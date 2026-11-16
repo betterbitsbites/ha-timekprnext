@@ -1,0 +1,28 @@
+name: tk-budget
+version: "0.1.0"
+slug: tk_budget
+description: Shared weekly screen-time budget for Timekpr-nExT clients
+url: https://github.com/<owner>/ha-timekprnext
+arch:
+  - amd64
+  - aarch64
+  - armv7
+init: false
+startup: application
+boot: auto
+options:
+  broker_host: core-mosquitto
+  broker_port: 1883
+  broker_user: tk-budget
+  broker_password: ""
+  kids:
+    - kid-a
+  db_path: /data/tk-budget.db
+schema:
+  broker_host: str
+  broker_port: port
+  broker_user: str
+  broker_password: password
+  kids:
+    - match(^[a-z0-9_-]+$)
+  db_path: str

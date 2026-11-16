@@ -1,0 +1,30 @@
+# Mosquitto ACL for ha-timekprnext. Copy the relevant blocks into your broker's acl_file.
+# Host ids and kid ids share the `timekpr/` namespace: they must never be equal.
+
+# --- one block per client PC (user = tk-agent-<client-host>) -------------------
+user tk-agent-<client-host>
+# own usage, status (LWT) and events
+topic write timekpr/<client-host>/#
+# HA discovery for the PC's online sensor
+topic write homeassistant/binary_sensor/tk_<client-host>/#
+# budget output for all kids
+topic read timekpr/+/remaining
+topic read timekpr/+/settings
+
+# --- tk-budget add-on ----------------------------------------------------------
+user tk-budget
+topic read timekpr/#
+topic write timekpr/+/remaining
+topic write timekpr/+/settings
+topic write timekpr/+/state
+topic write timekpr/_budget/status
+topic write homeassistant/#
+
+# --- Home Assistant (MQTT integration user) ------------------------------------
+user homeassistant
+topic read timekpr/#
+topic read homeassistant/#
+topic write homeassistant/#
+# dashboard buttons, number and select
+topic write timekpr/+/cmd
+topic write timekpr/+/set/#
