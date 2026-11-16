@@ -30,6 +30,10 @@ class UsageLedger:
         changed = _raise_to(self._day, (host, kid, day), total_day_s) or changed
         return changed
 
+    def restore(self, host: str, kid: str, week: str, total_s: int) -> None:
+        """Load a persisted weekly total (after a restart); day totals live in the store."""
+        _raise_to(self._week, (host, kid, week), total_s)
+
     def used_s(self, kid: str, week: str) -> int:
         return sum(v for (_, k, w), v in self._week.items() if k == kid and w == week)
 

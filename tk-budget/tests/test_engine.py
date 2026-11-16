@@ -59,3 +59,11 @@ def test_ledger_day_used_per_host():
     assert led.day_used_s("kid-a", "2026-11-16") == {"pc1": 600, "pc2": 300}
     assert led.day_used_s("kid-a", "2026-11-17") == {"pc1": 100}
     assert led.day_used_s("kid-b", "2026-11-16") == {}
+
+
+def test_ledger_restore_week_total_only():
+    led = UsageLedger()
+    led.restore("pc1", "kid-a", "2026-W47", 3600)
+    assert led.used_s("kid-a", "2026-W47") == 3600
+    assert led.update("pc1", "kid-a", "2026-W47", 3000, "2026-11-16", 10) is True  # day is new
+    assert led.used_s("kid-a", "2026-W47") == 3600
