@@ -1,0 +1,30 @@
+# Builds tk-agent from this repository checkout (hence $startdir, no sources):
+#   cd tk-agent/packaging && makepkg -si
+pkgname=tk-agent
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Home Assistant shared screen-time budget agent for Timekpr-nExT"
+arch=('any')
+url="https://github.com/<owner>/ha-timekprnext"
+license=('LicenseRef-unspecified')  # no license chosen for the repo yet
+depends=('python' 'python-paho-mqtt' 'timekpr-next')
+backup=('etc/tk-agent.conf')
+source=()
+
+_repo() { realpath "$startdir/../.."; }
+
+package() {
+    local repo site
+    repo="$(_repo)"
+    site="$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+
+    install -d "$pkgdir$site/tk_protocol" "$pkgdir$site/tk_agent"
+    install -m644 "$repo"/protocol/tk_protocol/*.py "$pkgdir$site/tk_protocol/"
+    install -m644 "$repo"/tk-agent/tk_agent/*.py "$pkgdir$site/tk_agent/"
+    python -m compileall -q -d "$site" "$pkgdir$site/tk_protocol" "$pkgdir$site/tk_agent"
+    python -O -m compileall -q -d "$site" "$pkgdir$site/tk_protocol" "$pkgdir$site/tk_agent"
+
+    install -Dm644 "$repo/tk-agent/packaging/tk-agent.service" "$pkgdir/usr/lib/systemd/system/tk-agent.service"
+    install -Dm600 "$repo/tk-agent/packaging/tk-agent.conf.example" "$pkgdir/etc/tk-agent.conf"
+    install -Dm644 "$repo/tk-agent/packaging/tk-agent.conf.example" "$pkgdir/usr/share/doc/tk-agent/tk-agent.conf.example"
+}

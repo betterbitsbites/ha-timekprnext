@@ -1,0 +1,18 @@
+[Unit]
+Description=Shared screen-time budget agent for Timekpr-nExT
+Wants=network-online.target
+After=network-online.target timekpr.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 -m tk_agent.main /etc/tk-agent.conf
+Restart=always
+RestartSec=10
+StateDirectory=tk-agent
+StateDirectoryMode=0700
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

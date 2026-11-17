@@ -1,0 +1,18 @@
+# /etc/tk-agent.conf — mode 600, root:root (holds MQTT credentials).
+
+[broker]
+host = <broker-host>
+port = 1883
+username = tk-agent-<client-host>
+password = <mqtt-password>
+
+[agent]
+# Unique id of this PC, [a-z0-9_-]+, must differ from every kid id.
+host_id = <client-host>
+# Poll/report interval in seconds (30..60).
+interval_s = 45
+# state_dir = /var/lib/tk-agent
+
+[kids]
+# <timekpr user on this PC> = <kid id used in tk-budget and HA>
+<kid-user> = kid-a
