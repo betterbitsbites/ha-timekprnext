@@ -3,8 +3,9 @@
 
 # --- one block per client PC (user = tk-agent-<client-host>) -------------------
 user tk-agent-<client-host>
-# own usage, status (LWT) and events
-topic write timekpr/<client-host>/#
+# own usage, status (LWT) and events; read too: on start the agent restores its
+# counters from its own retained usage if its state file was lost
+topic readwrite timekpr/<client-host>/#
 # HA discovery for the PC's online sensor
 topic write homeassistant/binary_sensor/tk_<client-host>/#
 # budget output for all kids
