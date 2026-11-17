@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tk-agent"
+version = "0.1.0"
+description = "Per-PC agent: measures and enforces a shared time budget through the timekpra CLI"
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = ["tk_agent"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "../protocol"]
+testpaths = ["tests"]

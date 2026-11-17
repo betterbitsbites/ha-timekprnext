@@ -1,6 +1,6 @@
 """Injectable clock (local time, naive datetimes)."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Protocol
 
 
@@ -22,3 +22,12 @@ class FixedClock:
 
     def set(self, dt: datetime) -> None:
         self._dt = dt
+
+
+def week_key(d: date) -> str:
+    """ISO week key, Monday start, e.g. `2026-W47`."""
+    return d.strftime("%G-W%V")
+
+
+def day_key(d: date) -> str:
+    return d.isoformat()

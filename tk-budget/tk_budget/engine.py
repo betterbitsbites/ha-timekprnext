@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date
+from tk_protocol.clock import week_key
 
-
-def week_key(d: date) -> str:
-    """ISO week key with Monday start, e.g. `2026-W47`."""
-    return d.strftime("%G-W%V")
+__all__ = ["UsageLedger", "remaining_total_s", "week_key"]
 
 
 def remaining_total_s(weekly_budget_min: int, adjustment_s: int, used_s: int) -> int:
