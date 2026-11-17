@@ -1,0 +1,29 @@
+## probe-tick.txt (from an earlier `full` run on 2026-11-16 that set 5400 s; its full output was overwritten)
+
+===== $ timekpra --getuserinfort tkprobe =====
+----- at 2026-11-16 22:28:57 +0100
+# Configuration for user tkprobe:
+ACTUAL_TIME_SPENT_SESSION: 24
+ACTUAL_TIME_INACTIVE_SESSION: 0
+ACTUAL_TIME_SPENT_BALANCE: 81024
+ACTUAL_TIME_SPENT_DAY: 176
+ACTUAL_TIME_LEFT_DAY: 5376
+ACTUAL_TIME_LEFT_CONTINUOUS: 5376
+ACTUAL_PLAYTIME_LEFT_DAY: 0
+ACTUAL_ACTIVE_PLAYTIME_ACTIVITY_COUNT: 0
+----- exit=0
+
+## probe-midnight.txt (4.5 min after the `full` run in probe-full.txt, test user active)
+
+===== $ timekpra --getuserinfort tkprobe =====
+----- at 2026-11-17 01:07:22 +0100
+# Configuration for user tkprobe:
+ACTUAL_TIME_SPENT_SESSION: 498
+ACTUAL_TIME_INACTIVE_SESSION: 0
+ACTUAL_TIME_SPENT_BALANCE: 81270
+ACTUAL_TIME_SPENT_DAY: 480
+ACTUAL_TIME_LEFT_DAY: 5130
+ACTUAL_TIME_LEFT_CONTINUOUS: 5130
+ACTUAL_PLAYTIME_LEFT_DAY: 0
+ACTUAL_ACTIVE_PLAYTIME_ACTIVITY_COUNT: 0
+----- exit=0

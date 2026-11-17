@@ -1,0 +1,39 @@
+## probe-full.txt, 2026-11-17 01:02:50–52 +0100, timekpr-next 0.5.10-1, test user active.
+## All commands exited 0. --getuserinfo blocks are reduced to the lines that matter;
+## one complete block is in tk-agent/tests/fixtures/getuserinfo.txt. Static config in every block:
+##   ALLOWED_HOURS_1..7: 0..23, LIMITS_PER_WEEKDAYS: 86400 x7, TRACK_INACTIVE: False,
+##   LIMIT_PER_WEEK: 604800, LIMIT_PER_MONTH: 2678400, PLAYTIME_ENABLED: False,
+##   PLAYTIME_LIMITS_PER_WEEKDAYS: 0 x7, TIME_SPENT_WEEK: 1871, TIME_SPENT_MONTH: 1871
+## original LOCKOUT_TYPE: 'terminate'
+
+(1) baseline --getuserinfo
+  TIME_SPENT_BALANCE: 210  TIME_SPENT_DAY: 210  TIME_LEFT_DAY: 82630  PLAYTIME_LEFT_DAY: 0
+  ACTUAL_TIME_SPENT_SESSION: 228  ACTUAL_TIME_SPENT_BALANCE: 228  ACTUAL_TIME_SPENT_DAY: 228
+  ACTUAL_TIME_LEFT_DAY: 82630  ACTUAL_TIME_LEFT_CONTINUOUS: 169030
+(1) baseline --getuserinfort
+  ACTUAL_TIME_SPENT_SESSION: 228  ACTUAL_TIME_SPENT_BALANCE: 228  ACTUAL_TIME_SPENT_DAY: 228
+  ACTUAL_TIME_LEFT_DAY: 82630  ACTUAL_TIME_LEFT_CONTINUOUS: 169030  ACTUAL_PLAYTIME_LEFT_DAY: 0
+
+--settimeleft tkprobe = 3600  → exit 0
+  rt:   BALANCE 82800  SPENT_DAY 210  LEFT_DAY 3600  LEFT_CONTINUOUS 169030
+  info: TIME_SPENT_BALANCE 82800  TIME_SPENT_DAY 210  TIME_LEFT_DAY 3600
+
+--settimeleft tkprobe = 1h    → exit 0
+  rt:   BALANCE 82800  LEFT_DAY 3600   (no visible change; ambiguous, value was already 3600)
+
+--settimeleft tkprobe + 15m   → exit 0
+  rt:   BALANCE 81900  LEFT_DAY 4500
+
+--settimeleft tkprobe + 900   → exit 0
+  rt:   BALANCE 81000  LEFT_DAY 5400
+  info: TIME_SPENT_BALANCE 81000  TIME_SPENT_DAY 210  TIME_LEFT_DAY 5400
+
+--setplaytimeleft tkprobe = 1800 → exit 0
+  rt:   ACTUAL_PLAYTIME_LEFT_DAY 0 (playtime disabled)
+  next info: PLAYTIME_LEFT_DAY 1800  PLAYTIME_SPENT_DAY 0
+
+--setlockouttype tkprobe lock      → exit 0, info LOCKOUT_TYPE: lock
+--setlockouttype tkprobe shutdown  → exit 0, info LOCKOUT_TYPE: shutdown
+--setlockouttype tkprobe terminate → exit 0, info LOCKOUT_TYPE: terminate
+--setlockouttype tkprobe suspend   → exit 0, info LOCKOUT_TYPE: suspend
+--setlockouttype tkprobe terminate → exit 0 (restore)
