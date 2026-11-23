@@ -134,11 +134,11 @@ def test_budget_number_command_sets_budget(env):
 
 def test_time_up_action_select_publishes_settings(env):
     bus, store, *_ = env
-    assert Settings.from_json(bus.retained[topics.settings(KID)]).time_up_action == "terminate"
-    bus.publish(discovery.set_topic(KID, "time_up_action"), "lock")
-    assert Settings.from_json(bus.retained[topics.settings(KID)]) == Settings(time_up_action="lock")
+    assert Settings.from_json(bus.retained[topics.settings(KID)]).time_up_action == "lock"
+    bus.publish(discovery.set_topic(KID, "time_up_action"), "shutdown")
+    assert Settings.from_json(bus.retained[topics.settings(KID)]) == Settings(time_up_action="shutdown")
     bus.publish(discovery.set_topic(KID, "time_up_action"), "explode")
-    assert Settings.from_json(bus.retained[topics.settings(KID)]) == Settings(time_up_action="lock")
+    assert Settings.from_json(bus.retained[topics.settings(KID)]) == Settings(time_up_action="shutdown")
 
 
 def test_unset_budget_fails_closed(tmp_path):

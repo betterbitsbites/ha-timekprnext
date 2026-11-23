@@ -5,9 +5,9 @@ from __future__ import annotations
 from tk_protocol import topics
 from tk_protocol.payloads import Cmd
 
-# timekpr's own lockout-type names (pending spike/RESULTS.md (e)); `terminate` logs the user out.
+# timekpr's own lockout-type names (accepted in spike/RESULTS.md (e)); `terminate` logs the user out.
 TIME_UP_ACTIONS = ["shutdown", "lock", "terminate", "suspend"]
-DEFAULT_TIME_UP_ACTION = "terminate"  # timekpr's default, so installing changes nothing
+DEFAULT_TIME_UP_ACTION = "lock"  # chosen by the human partner
 MAX_WEEKLY_MIN = 7 * 24 * 60
 STATUS_TOPIC = f"{topics.PREFIX}/_budget/status"
 
