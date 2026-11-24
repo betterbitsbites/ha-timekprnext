@@ -53,7 +53,7 @@ journalctl -u tk-agent -f
 
 ## Example dashboard card
 
-Entity ids for kid `kid-a` (HA turns `-` into `_`):
+Entity ids for kid `kid-a` (`-` becomes `_`). tk-budget ≥ 0.3.1 sets them via `default_entity_id`; HA applies that only when it first creates an entity. Devices created by 0.3.0 got ids like `sensor.screen_time_kid_a_remaining_total`: delete the device in HA and restart tk-budget to get the ids below (budget and settings are kept in tk-budget).
 
 ```yaml
 type: entities

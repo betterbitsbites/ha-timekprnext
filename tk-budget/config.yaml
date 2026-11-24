@@ -1,5 +1,5 @@
 name: tk-budget
-version: "0.3.0"
+version: "0.3.1"
 slug: tk_budget
 description: Shared weekly screen-time budget for Timekpr-nExT clients
 url: https://github.com/<owner>/ha-timekprnext

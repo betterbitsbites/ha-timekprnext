@@ -30,11 +30,12 @@ def set_topic(kid: str, key: str) -> str:
     return f"{topics.PREFIX}/{kid}/set/{key}"
 
 
-def _base(kid: str, obj: str, name: str) -> dict:
+def _base(kid: str, component: str, obj: str, name: str) -> dict:
     return {
         "name": name,
         "unique_id": f"tk_{kid}_{obj}",
-        "object_id": f"tk_{kid}_{obj}",
+        # HA >= 2025.10 ignores object_id; this sets the entity id when HA first sees the entity
+        "default_entity_id": f"{component}.tk_{kid.replace('-', '_')}_{obj}",
         "availability_topic": STATUS_TOPIC,
         "device": {"identifiers": [f"tk_budget_{kid}"], "name": f"Screen time {kid}",
                    "manufacturer": "ha-timekprnext", "model": "tk-budget"},
@@ -49,37 +50,37 @@ def entities(kid: str) -> list[tuple[str, dict]]:
     st = state_topic(kid)
     out: list[tuple[str, dict]] = []
 
-    p = _base(kid, "remaining_total", "Remaining total")
+    p = _base(kid, "sensor", "remaining_total", "Remaining total")
     p.update(state_topic=st, unit_of_measurement="min", icon="mdi:timer-sand",
              value_template="{{ ((value_json.remaining_s / 60) | round(0) | int) if value_json.limited else None }}")
     out.append((_topic("sensor", kid, "remaining_total"), p))
 
-    p = _base(kid, "total_today", "Total time today")
+    p = _base(kid, "sensor", "total_today", "Total time today")
     p.update(state_topic=st, unit_of_measurement="min", icon="mdi:monitor-dashboard",
              state_class="total_increasing",
              value_template="{{ (value_json.today_s / 60) | round(0) | int }}")
     out.append((_topic("sensor", kid, "total_today"), p))
 
-    p = _base(kid, "weekly_total_budget", "Weekly total budget")
+    p = _base(kid, "number", "weekly_total_budget", "Weekly total budget")
     p.update(state_topic=st, command_topic=set_topic(kid, "weekly_total_min"),
              value_template="{{ value_json.weekly_total_min }}", min=0, max=MAX_WEEKLY_MIN,
              step=15, mode="box", unit_of_measurement="min", icon="mdi:calendar-clock")
     out.append((_topic("number", kid, "weekly_total_budget"), p))
 
     for obj, name, minutes in (("adjust_plus_15", "+15 min", 15), ("adjust_minus_15", "−15 min", -15)):
-        p = _base(kid, obj, name)
+        p = _base(kid, "button", obj, name)
         p.update(command_topic=topics.cmd(kid),
                  payload_press=Cmd(op="adjust_total", minutes=minutes).to_json(),
                  icon="mdi:plus-circle" if minutes > 0 else "mdi:minus-circle")
         out.append((_topic("button", kid, obj), p))
 
-    p = _base(kid, "time_up_action", "Time-up action")
+    p = _base(kid, "select", "time_up_action", "Time-up action")
     p.update(state_topic=st, command_topic=set_topic(kid, "time_up_action"),
              value_template="{{ value_json.time_up_action }}", options=list(TIME_UP_ACTIONS),
              icon="mdi:power")
     out.append((_topic("select", kid, "time_up_action"), p))
 
-    p = _base(kid, LIMIT_KEY, "Limit active")
+    p = _base(kid, "switch", LIMIT_KEY, "Limit active")
     p.update(state_topic=st, command_topic=set_topic(kid, LIMIT_KEY), payload_on="ON", payload_off="OFF",
              value_template="{{ 'ON' if value_json.limited else 'OFF' }}", icon="mdi:timer-lock")
     out.append((_topic("switch", kid, LIMIT_KEY), p))

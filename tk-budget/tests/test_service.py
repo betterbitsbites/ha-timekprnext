@@ -239,3 +239,11 @@ def test_upgrade_kid_with_budget_stays_limited(tmp_path):
     report(bus, "pc1", 600, kid="kid-b")
     assert remaining(bus, "kid-b") == Remaining(week="2026-W47", total_s=7200 - 600, limited=True)
     assert store.get_setting("kid-b", "limit_active") == "ON"
+
+
+def test_discovery_sets_default_entity_id():
+    # HA >= 2025.10 ignores object_id; default_entity_id fixes the entity id on first discovery
+    for topic, p in discovery.entities(KID):
+        component, obj = topic.split("/")[1], topic.split("/")[3]
+        assert p["default_entity_id"] == f"{component}.tk_kid_a_{obj}"
+        assert "object_id" not in p
