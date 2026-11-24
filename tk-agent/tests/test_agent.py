@@ -11,7 +11,8 @@ from tk_protocol.bus import InMemoryBus
 from tk_protocol.clock import FixedClock
 from tk_protocol.payloads import Event, Remaining, Settings, Usage
 
-USER, KID, HOST = "kiduser", "kid-a", "pc1"
+USER = KID = "kid-a"  # the timekpr user name is the kid id
+HOST = "pc1"
 WEEK = "2026-W47"
 MON_10 = datetime(2026, 11, 16, 10, 0)
 
@@ -25,6 +26,14 @@ class FakeTimekpra:
         self.writes: list[tuple[str, int]] = []
         self.lockouts: list[tuple[str, str]] = []
         self.consumed = 0
+        self.user_list = [USER]
+        self.fail_users = 0  # next n users() calls raise
+
+    def users(self) -> list[str]:
+        if self.fail_users:
+            self.fail_users -= 1
+            raise RuntimeError("timekpra --userlist failed")
+        return list(self.user_list)
 
     def _cap(self) -> int:
         now = self.clock.now()
@@ -55,7 +64,7 @@ def env(tmp_path):
     bus = InMemoryBus()
     tk = FakeTimekpra(clock)
     cfg = Config(broker_host="b", broker_port=1883, username="u", password="p", host_id=HOST,
-                 interval_s=45, kids={USER: KID}, state_dir=str(tmp_path))
+                 interval_s=45, state_dir=str(tmp_path))
     agent = Agent(cfg, bus, tk, lambda user: UsageMeter(str(tmp_path / f"{user}.json"), clock), clock)
     return agent, bus, tk, clock
 
@@ -68,18 +77,94 @@ def events(bus) -> list[str]:
     return [Event.from_json(p).type for t, p, _ in bus.published if t == topics.event(HOST, KID)]
 
 
-def send_remaining(bus, total_s, week=WEEK):
-    bus.publish(topics.remaining(KID), Remaining(week=week, total_s=total_s).to_json(), retain=True)
+def send_remaining(bus, total_s, week=WEEK, kid=KID, limited=True):
+    bus.publish(topics.remaining(kid), Remaining(week=week, total_s=total_s, limited=limited).to_json(),
+                retain=True)
 
 
-def test_start_publishes_online_and_discovery(env):
+def new_agent(agent, bus, tk, clock, tmp_path):
+    return Agent(agent.cfg, bus, tk, lambda u: UsageMeter(str(tmp_path / f"{u}.json"), clock), clock)
+
+
+def test_start_publishes_online_without_discovery(env):
     agent, bus, *_ = env
     agent.start()
     assert bus.retained[topics.status(HOST)] == "online"
-    cfg = json.loads(bus.retained["homeassistant/binary_sensor/tk_pc1/online/config"])
-    assert cfg["state_topic"] == topics.status(HOST)
-    assert (cfg["payload_on"], cfg["payload_off"]) == ("online", "offline")
-    assert cfg["unique_id"] == "tk_pc1_online"
+    assert not any(t.startswith("homeassistant/") for t in bus.retained)
+
+
+def test_unlimited_never_writes(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_remaining(bus, 0, limited=False)
+    for _ in range(3):
+        agent.tick()
+        tk.run(45)
+    agent.tick()
+    assert tk.writes == [] and events(bus) == []
+    assert usage(bus).total_s == 135
+
+
+def test_no_remaining_reports_every_listed_user(env):
+    agent, bus, tk, _ = env
+    tk.user_list = ["kid-a", "kid-b", "parent"]
+    agent.start()
+    agent.tick()
+    assert tk.writes == []
+    for user in tk.user_list:
+        assert topics.usage(HOST, user) in bus.retained
+
+
+def test_unlimit_releases_once_even_after_restart(env, tmp_path):
+    agent, bus, tk, clock = env
+    agent.start()
+    send_remaining(bus, 0)
+    agent.tick()
+    assert tk.writes == [(USER, 0)]
+    send_remaining(bus, 0, limited=False)
+    agent.tick()
+    agent.tick()
+    assert tk.writes == [(USER, 0), (USER, 86400)]
+    agent2 = new_agent(agent, bus, tk, clock, tmp_path)
+    agent2.start()  # the retained unlimited remaining is delivered again
+    agent2.tick()
+    assert tk.writes == [(USER, 0), (USER, 86400)]
+    send_remaining(bus, 300)
+    agent2.tick()
+    assert tk.writes[-1][0] == USER and 0 < tk.writes[-1][1] <= 300
+
+
+def test_user_appearing_later_uses_retained_remaining(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_remaining(bus, 600, kid="kid-b")
+    agent.tick()
+    assert tk.writes == []
+    tk.user_list.append("kid-b")
+    agent.tick()
+    assert tk.writes == [("kid-b", 600)]
+
+
+def test_invalid_and_host_named_users_skipped(env, caplog):
+    agent, bus, tk, _ = env
+    tk.user_list = ["Kid", HOST, "kid-a"]
+    agent.start()
+    agent.tick()
+    agent.tick()
+    usage_topics = [t for t in bus.retained if t.endswith("/usage")]
+    assert usage_topics == [topics.usage(HOST, "kid-a")]
+    assert caplog.text.count("user 'Kid'") == 1
+    assert caplog.text.count(f"user '{HOST}'") == 1
+
+
+def test_userlist_failure_keeps_last_users(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    agent.tick()
+    tk.fail_users = 1
+    send_remaining(bus, 600)
+    agent.tick()
+    assert tk.writes == [(USER, 600)]
 
 
 def test_usage_published_cumulative_and_retained(env):
@@ -184,6 +269,7 @@ def test_time_low_event_once_and_rearmed(env):
 def test_lockout_type_applied_on_settings_change(env):
     agent, bus, tk, _ = env
     agent.start()
+    send_remaining(bus, 5400)
     bus.publish(topics.settings(KID), Settings(time_up_action="lock").to_json(), retain=True)
     agent.tick()
     agent.tick()
@@ -211,7 +297,7 @@ def test_restart_continues_counting_without_loss_or_double(env, tmp_path):
     agent.tick()
     before = usage(bus).total_s
     tk.run(50)  # used while the agent is down
-    agent2 = Agent(agent.cfg, bus, tk, lambda u: UsageMeter(str(tmp_path / f"{u}.json"), clock), clock)
+    agent2 = new_agent(agent, bus, tk, clock, tmp_path)
     agent2.start()
     agent2.tick()
     assert usage(bus).total_s == before + 50 == tk.consumed
@@ -224,7 +310,7 @@ def test_lost_state_file_restored_from_retained_usage(env, tmp_path):
     tk.run(300)
     agent.tick()
     (tmp_path / f"{USER}.json").unlink()
-    agent2 = Agent(agent.cfg, bus, tk, lambda u: UsageMeter(str(tmp_path / f"{u}.json"), clock), clock)
+    agent2 = new_agent(agent, bus, tk, clock, tmp_path)
     agent2.start()
     agent2.tick()
     tk.run(45)
@@ -283,6 +369,19 @@ def test_restart_without_broker_keeps_enforcing_last_remaining(env, tmp_path):
     # next day, PC boots without broker; timekpr has reset time left to its own 24 h
     clock.set(datetime(2026, 11, 17, 10, 0))
     tk.left = 86400
-    agent2 = Agent(agent.cfg, InMemoryBus(), tk, lambda u: UsageMeter(str(tmp_path / f"{u}.json"), clock), clock)
+    agent2 = new_agent(agent, InMemoryBus(), tk, clock, tmp_path)
     agent2.tick()
     assert tk.writes[-1] == (USER, 300)
+
+
+def test_lockout_type_not_set_for_unlimited_or_unknown(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    bus.publish(topics.settings(KID), Settings(time_up_action="lock").to_json(), retain=True)
+    agent.tick()
+    send_remaining(bus, 0, limited=False)
+    agent.tick()
+    assert tk.lockouts == []
+    send_remaining(bus, 600)
+    agent.tick()
+    assert tk.lockouts == [(USER, "lock")]

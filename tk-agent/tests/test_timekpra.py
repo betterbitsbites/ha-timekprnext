@@ -53,3 +53,18 @@ def test_set_lockout_type():
 def test_option_like_username_rejected():
     with pytest.raises(ValueError):
         Timekpra(FakeRunner()).time_left_s("--help")
+
+
+def test_timekpra_users_parses_fixture():
+    r = FakeRunner((FIXTURES / "userlist.txt").read_text())
+    assert Timekpra(r).users() == ["kid-a", "kid-b", "parent"]
+    assert r.calls == [["--userlist"]]
+
+
+def test_timekpra_users_without_header_raises():
+    with pytest.raises(TimekpraError):
+        Timekpra(FakeRunner("kid-a\n")).users()
+
+
+def test_timekpra_users_single_user_header():
+    assert Timekpra(FakeRunner("1 user in total:\nkid-a\n\n")).users() == ["kid-a"]

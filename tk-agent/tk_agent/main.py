@@ -36,7 +36,7 @@ def main() -> None:
     agent = Agent(cfg, bus, Timekpra(),
                   lambda user: UsageMeter(os.path.join(cfg.state_dir, f"{user}.json"), clock), clock)
     agent.start()
-    log.info("tk-agent %s running for %s", cfg.host_id, ", ".join(f"{u}->{k}" for u, k in cfg.kids.items()))
+    log.info("tk-agent %s running for all timekpr users", cfg.host_id)
     while True:
         try:
             agent.tick()

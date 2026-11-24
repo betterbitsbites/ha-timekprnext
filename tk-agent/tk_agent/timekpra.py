@@ -13,6 +13,7 @@ from typing import Callable
 
 LOCKOUT_TYPES = ("lock", "shutdown", "terminate", "suspend")
 _TIME_LEFT_RE = re.compile(r"^ACTUAL_TIME_LEFT_DAY:\s*(\S+)\s*$", re.MULTILINE)
+_USERLIST_HEADER_RE = re.compile(r"^\d+ users? in total:$")
 
 Runner = Callable[[list[str]], str]
 
@@ -34,6 +35,13 @@ def subprocess_runner(argv: list[str]) -> str:
 class Timekpra:
     def __init__(self, runner: Runner = subprocess_runner) -> None:
         self._run = runner
+
+    def users(self) -> list[str]:
+        """timekpr's users: a header `N users in total:`, then one name per line."""
+        lines = [line.strip() for line in self._run(["--userlist"]).splitlines() if line.strip()]
+        if not lines or not _USERLIST_HEADER_RE.match(lines[0]):
+            raise TimekpraError("unexpected timekpra --userlist output")
+        return lines[1:]
 
     def time_left_s(self, user: str) -> int:
         out = self._run(["--getuserinfort", _user(user)])
