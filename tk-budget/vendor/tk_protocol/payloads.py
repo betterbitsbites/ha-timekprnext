@@ -28,6 +28,8 @@ class _Payload:
         kwargs: dict[str, Any] = {}
         for f in dataclasses.fields(cls):  # type: ignore[arg-type]
             if f.name not in data:
+                if f.default is not dataclasses.MISSING:
+                    continue  # optional field, added later: keep the dataclass default
                 raise ValueError(f"missing field {f.name!r}")
             kwargs[f.name] = _check(f.name, hints[f.name], data[f.name])
         return cls(**kwargs)
@@ -37,6 +39,10 @@ def _check(name: str, tp: Any, value: Any) -> Any:
     if typing.get_origin(tp) is Literal:
         if value not in typing.get_args(tp):
             raise ValueError(f"{name}: {value!r} not one of {typing.get_args(tp)}")
+        return value
+    if tp is bool:
+        if not isinstance(value, bool):
+            raise ValueError(f"{name}: expected bool")
         return value
     if tp is int:
         if not isinstance(value, int) or isinstance(value, bool):
@@ -70,8 +76,12 @@ class Usage(_Payload):
 
 @dataclass(frozen=True)
 class Remaining(_Payload):
+    """Shared remaining time of one kid. `limited` false: no limit, `total_s` is 0 and ignored.
+    Payloads from before the field existed parse as limited (fail closed)."""
+
     week: str
     total_s: int
+    limited: bool = True
 
     def __post_init__(self) -> None:
         _non_negative(total_s=self.total_s)

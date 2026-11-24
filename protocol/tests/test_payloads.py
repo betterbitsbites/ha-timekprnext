@@ -30,3 +30,17 @@ def test_literal_fields_validated():
         Event.from_json('{"type": "boom", "ts": "x"}')
     with pytest.raises(ValueError):
         Cmd.from_json('{"op": "rm", "minutes": 1}')
+
+
+def test_remaining_limited_roundtrip():
+    r = Remaining(week="2026-W47", total_s=0, limited=False)
+    assert Remaining.from_json(r.to_json()) == r
+
+
+def test_remaining_without_limited_is_limited():
+    assert Remaining.from_json('{"week":"2026-W47","total_s":5}').limited is True
+
+
+def test_remaining_limited_must_be_bool():
+    with pytest.raises(ValueError):
+        Remaining.from_json('{"week":"2026-W47","total_s":5,"limited":1}')
