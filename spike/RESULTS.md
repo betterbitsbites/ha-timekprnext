@@ -29,6 +29,7 @@ Replace real host names with `<client-host>` before pasting.
 - (d) **Day change resets the balance**: at 22:28 the balance was 81024 (time left 5376); after midnight it was 210 and time left back to the daily limit. A value set with `settimeleft` does **not** carry into the next day — after midnight timekpr grants its own daily limit until the agent writes again. **`ACTUAL_TIME_LEFT_DAY` is also capped by the time until midnight** (baseline 82630 s at 01:02:50 = time to 24:00, although limit 86400 and balance 210). `ACTUAL_TIME_LEFT_CONTINUOUS` (169030) spans past midnight, so timekpr does not kick the user at 24:00.
 - (e) `lock`, `shutdown`, `terminate`, `suspend` are all accepted and stored in `LOCKOUT_TYPE`. What each does at time-up was not tested (acceptance, Task 9).
 - (f) `--setplaytimeleft <user> = <seconds>` is accepted and shows as `PLAYTIME_LEFT_DAY` in `--getuserinfo`; `ACTUAL_PLAYTIME_LEFT_DAY` stays 0 while PlayTime is disabled. To be explored in the play-time plan with PlayTime enabled.
+- (g) **Logged-out users** (found in acceptance, 2026-11-24): `--getuserinfort` prints only the header `# Configuration for user <u>:` (exit 0), and `--settimeleft` is accepted but has no effect (`TIME_LEFT_DAY` stays at the time until midnight). The agent reports unchanged usage for them and enforces from the first tick after login (≤ one interval).
 
 **Verdict:** `TimeLeftEnforcer` as planned (Tasks 6–7 proceed), with two consequences:
 

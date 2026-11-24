@@ -42,7 +42,7 @@ _ID_RE = re.compile(r"^[a-z0-9_-]+$")
 
 class TimekpraLike(Protocol):
     def users(self) -> list[str]: ...
-    def time_left_s(self, user: str) -> int: ...
+    def time_left_s(self, user: str) -> int | None: ...
     def set_time_left_s(self, user: str, seconds: int) -> None: ...
     def set_lockout_type(self, user: str, value: str) -> None: ...
 
@@ -147,10 +147,13 @@ class Agent:
         kid = user
         meter = self._meters[user]
         left = self._tk.time_left_s(user)
-        meter.observe(left)
+        if left is not None:
+            meter.observe(left)
         week, day = meter.current_week(), meter.current_day()
         u = Usage(week=week, total_s=meter.week_total_s(week), day=day, total_day_s=meter.day_total_s(day))
         self._bus.publish(topics.usage(self.cfg.host_id, kid), u.to_json(), retain=True)
+        if left is None:
+            return  # not logged in: uses no time, and timekpr ignores writes until login
 
         snap = self._snap[user]
         if snap is None:
@@ -158,7 +161,7 @@ class Agent:
         if not snap.limited:
             if not snap.released:
                 self._tk.set_time_left_s(user, MAX_TIME_LEFT_S)  # limit lifted: free a locked kid once
-                meter.wrote(self._tk.time_left_s(user))
+                self._wrote(user)
                 snap.released = True
                 self._save_snapshot(user, snap)
             return
@@ -171,8 +174,13 @@ class Agent:
         expected = min(target, self._seconds_to_midnight())  # timekpr caps time left at midnight
         if abs(expected - left) >= WRITE_TOLERANCE_S or (target == 0 and left > 0):
             self._tk.set_time_left_s(user, target)
-            meter.wrote(self._tk.time_left_s(user))  # read back: exit codes prove nothing
+            self._wrote(user)
         self._events(user, kid, target)
+
+    def _wrote(self, user: str) -> None:
+        back = self._tk.time_left_s(user)  # read back: exit codes prove nothing
+        if back is not None:  # None: logged out in between; the next login tick observes afresh
+            self._meters[user].wrote(back)
 
     def _events(self, user: str, kid: str, target: int) -> None:
         if target > TIME_LOW_S:

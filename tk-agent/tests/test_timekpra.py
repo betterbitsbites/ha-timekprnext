@@ -28,6 +28,12 @@ def test_parse_time_left_from_full_info_fixture():
     assert Timekpra(run).time_left_s("tkprobe") == 5400
 
 
+def test_time_left_of_logged_out_user_is_none():
+    # spike Task 9: for a user without a session timekpra prints only the header (exit 0)
+    run = FakeRunner((FIXTURES / "getuserinfort-logged-out.txt").read_text())
+    assert Timekpra(run).time_left_s("kid-a") is None
+
+
 def test_time_left_missing_field_raises():
     with pytest.raises(TimekpraError):
         Timekpra(FakeRunner("# Configuration for user x:\nTIME_LEFT_DAY: 5\n")).time_left_s("x")

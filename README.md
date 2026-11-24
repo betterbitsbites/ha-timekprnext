@@ -15,6 +15,7 @@ Design: `docs/superpowers/specs/2026-11-16-timekpr-ha-design.md`. Spike findings
 - **Fail closed.** Without a fresh `remaining` the agent keeps enforcing the last one it received, minus what the PC used since; it never grants unlimited time. The last value survives a reboot without broker.
 - Adjustments (`+15 min` / `−15 min`) apply to the current week only and reset on Monday.
 - Two PCs used at once drain the budget twice as fast. Overshoot is bounded by about one or two report intervals (45 s).
+- timekpr ignores writes for users who are not logged in, so a kid is limited from the first report after login (≤ 45 s); until then timekpr's own settings apply.
 - At midnight timekpr resets "time left" to its own daily limit; the agent writes the budget again within one interval.
 - Each PC's id is its host name (lower case, first label). A timekpr user with the same name as a PC is skipped. Override with `host_id` in `/etc/tk-agent.conf` if needed.
 - To remove a user from HA, delete its device there (Settings → Devices).

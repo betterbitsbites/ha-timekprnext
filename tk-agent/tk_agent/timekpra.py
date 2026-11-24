@@ -3,6 +3,7 @@
 Formats verified in spike/RESULTS.md (timekpr-next 0.5.10): `--settimeleft <user> = <seconds>`,
 time left is `ACTUAL_TIME_LEFT_DAY` (seconds) in `--getuserinfort`. timekpra exits 0 even
 for values it ignores, so callers read the value back instead of trusting the exit code.
+For a user without a session there is no real-time info and writes are ignored.
 """
 
 from __future__ import annotations
@@ -43,8 +44,12 @@ class Timekpra:
             raise TimekpraError("unexpected timekpra --userlist output")
         return lines[1:]
 
-    def time_left_s(self, user: str) -> int:
+    def time_left_s(self, user: str) -> int | None:
+        """Seconds left today, or None if the user has no session (timekpra prints only the
+        header then, and `--settimeleft` has no effect: verified in Task 9)."""
         out = self._run(["--getuserinfort", _user(user)])
+        if [line for line in out.splitlines() if line.strip()] == [f"# Configuration for user {user}:"]:
+            return None
         m = _TIME_LEFT_RE.search(out)
         if not m:
             raise TimekpraError(f"ACTUAL_TIME_LEFT_DAY missing in timekpra output for {user}")

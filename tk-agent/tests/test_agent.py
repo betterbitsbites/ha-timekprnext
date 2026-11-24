@@ -28,6 +28,7 @@ class FakeTimekpra:
         self.consumed = 0
         self.user_list = [USER]
         self.fail_users = 0  # next n users() calls raise
+        self.logged_out: set[str] = set()  # no session: no real-time info, writes have no effect
 
     def users(self) -> list[str]:
         if self.fail_users:
@@ -40,12 +41,15 @@ class FakeTimekpra:
         midnight = datetime.combine(now.date() + timedelta(days=1), datetime.min.time())
         return int((midnight - now).total_seconds())
 
-    def time_left_s(self, user: str) -> int:
+    def time_left_s(self, user: str) -> int | None:
+        if user in self.logged_out:
+            return None
         return min(self.left, self._cap())
 
     def set_time_left_s(self, user: str, seconds: int) -> None:
         self.writes.append((user, seconds))
-        self.left = seconds
+        if user not in self.logged_out:
+            self.left = seconds
 
     def set_lockout_type(self, user: str, value: str) -> None:
         self.lockouts.append((user, value))
@@ -385,3 +389,46 @@ def test_lockout_type_not_set_for_unlimited_or_unknown(env):
     send_remaining(bus, 600)
     agent.tick()
     assert tk.lockouts == [(USER, "lock")]
+
+
+def test_logged_out_user_reported_but_not_written(env):
+    agent, bus, tk, _ = env
+    tk.logged_out.add(USER)
+    agent.start()
+    send_remaining(bus, 600)
+    agent.tick()
+    agent.tick()
+    assert tk.writes == []
+    assert usage(bus) == Usage(week=WEEK, total_s=0, day="2026-11-16", total_day_s=0)
+
+
+def test_logged_out_keeps_counters_and_enforces_after_login(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_remaining(bus, 600)
+    agent.tick()
+    tk.run(100)
+    agent.tick()
+    tk.logged_out.add(USER)
+    for _ in range(3):
+        agent.tick()
+    assert usage(bus).total_s == 100
+    tk.logged_out.discard(USER)
+    tk.left = 86400  # timekpr's own value at login
+    agent.tick()
+    assert tk.writes[-1] == (USER, 500)
+    assert usage(bus).total_s == 100
+
+
+def test_release_waits_for_login(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_remaining(bus, 0)
+    agent.tick()
+    tk.logged_out.add(USER)
+    send_remaining(bus, 0, limited=False)
+    agent.tick()
+    assert tk.writes == [(USER, 0)]
+    tk.logged_out.discard(USER)
+    agent.tick()
+    assert tk.writes == [(USER, 0), (USER, 86400)]
