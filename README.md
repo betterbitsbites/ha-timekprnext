@@ -17,18 +17,23 @@ Design: `docs/superpowers/specs/2026-11-16-timekpr-ha-design.md`. Spike findings
 - At midnight timekpr resets "time left" to its own daily limit; the agent writes the budget again within one interval.
 - Host ids and kid ids share the `timekpr/` topic namespace: they must be different (`[a-z0-9_-]+`).
 
-## 1. Broker (Mosquitto)
+## 1. Broker (Mosquitto add-on)
 
-Create one MQTT user per PC (`tk-agent-<client-host>`), one for the add-on (`tk-budget`) and use your existing HA MQTT user. Merge `mosquitto/acl.example` into the broker's ACL file and restart Mosquitto.
+Nothing to change in Mosquitto. Requirements: the Mosquitto broker add-on runs and the MQTT integration is set up in HA.
+
+- **tk-budget** gets its broker login from the Supervisor automatically (`services: mqtt:need`).
+- **Each PC** logs in with its own Home Assistant user (the Mosquitto add-on accepts HA users): HA → Settings → People → Users → Add user, user name `tk-agent-<client-host>`, not an administrator, "Can only log in from the local network". If HA rejects the `-`, use `tk_agent_<client-host>`. Put this user name and password into the PC's `/etc/tk-agent.conf`.
+
+Without an ACL every MQTT user may read and write every topic (the add-on's default). The kid cannot use the PC's login: `/etc/tk-agent.conf` is readable by root only. Optional hardening: activate `mosquitto/acl.example` via the Mosquitto add-on's `customize` option — first add the add-on's internal users `homeassistant` and `addons` and every existing device user with `topic readwrite #`, or they lose access.
 
 ## 2. tk-budget add-on
 
 1. HA → Settings → Add-ons → Add-on store → ⋮ → Repositories → add this repository's URL.
 2. Install **tk-budget**, set the options:
-   - `broker_host` / `broker_port` / `broker_user` / `broker_password`
    - `kids`: list of kid ids, e.g. `kid-a`
    - `db_path`: keep `/data/tk-budget.db` (statistics live there and are kept with add-on backups)
-3. Start it. Per kid a device "Screen time <kid>" appears with: Remaining total, Total time today, Weekly total budget, +15 min, −15 min, Time-up action.
+   - `broker_host` / `broker_port` / `broker_user` / `broker_password`: leave empty; only to use a broker other than the Mosquitto add-on
+3. Start it. The log shows `using MQTT broker core-mosquitto:1883 as addons`. Per kid a device "Screen time <kid>" appears with: Remaining total, Total time today, Weekly total budget, +15 min, −15 min, Time-up action.
 4. Set the weekly total budget.
 
 ## 3. tk-agent on each PC
@@ -37,7 +42,7 @@ Create one MQTT user per PC (`tk-agent-<client-host>`), one for the add-on (`tk-
 git clone <repository-url> ha-timekprnext
 cd ha-timekprnext/tk-agent/packaging
 makepkg -si                         # depends: python, python-paho-mqtt, timekpr-next
-sudoedit /etc/tk-agent.conf         # broker, host_id, [kids] <timekpr-user> = <kid-id>
+sudoedit /etc/tk-agent.conf         # HA host + the PC's HA user, host_id, [kids] <timekpr-user> = <kid-id>
 sudo systemctl enable --now tk-agent
 journalctl -u tk-agent -f
 ```

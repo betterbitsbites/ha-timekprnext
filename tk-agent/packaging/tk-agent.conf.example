@@ -1,10 +1,12 @@
 # /etc/tk-agent.conf — mode 600, root:root (holds MQTT credentials).
 
 [broker]
-host = <broker-host>
+# With the Mosquitto add-on: the Home Assistant host, port 1883, and the HA user
+# created for this PC (Settings → People → Users).
+host = <ha-host>
 port = 1883
 username = tk-agent-<client-host>
-password = <mqtt-password>
+password = <ha-user-password>
 
 [agent]
 # Unique id of this PC, [a-z0-9_-]+, must differ from every kid id.

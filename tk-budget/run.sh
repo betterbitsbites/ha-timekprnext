@@ -1,6 +1,6 @@
-#!/bin/sh
+#!/usr/bin/with-contenv bashio
+# with-contenv passes the container environment (SUPERVISOR_TOKEN) through s6-overlay.
 # Options are read by tk_budget.main from /data/options.json.
-# s6-overlay's /init does not pass the image ENV through, so set paths here.
 export PYTHONPATH=/app PYTHONUNBUFFERED=1
-cd /app
+cd /app || exit 1
 exec /opt/venv/bin/python3 -m tk_budget.main

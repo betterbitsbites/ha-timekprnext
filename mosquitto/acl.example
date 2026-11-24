@@ -1,4 +1,7 @@
-# Mosquitto ACL for ha-timekprnext. Copy the relevant blocks into your broker's acl_file.
+# OPTIONAL hardening. Not needed with the Mosquitto add-on's defaults (no ACL = all allowed).
+# With an ACL, every user not listed loses access: also list the add-on's internal users
+# `homeassistant` and `addons` and all existing device users (e.g. `topic readwrite #`).
+# tk-budget connects as `addons` (credentials from the Supervisor MQTT service).
 # Host ids and kid ids share the `timekpr/` namespace: they must never be equal.
 
 # --- one block per client PC (user = tk-agent-<client-host>) -------------------
@@ -12,20 +15,13 @@ topic write homeassistant/binary_sensor/tk_<client-host>/#
 topic read timekpr/+/remaining
 topic read timekpr/+/settings
 
-# --- tk-budget add-on ----------------------------------------------------------
-user tk-budget
-topic read timekpr/#
-topic write timekpr/+/remaining
-topic write timekpr/+/settings
-topic write timekpr/+/state
-topic write timekpr/_budget/status
-topic write homeassistant/#
+# --- add-ons, incl. tk-budget (Supervisor MQTT service user) --------------------
+# Other add-ons share this user, so it keeps full access.
+user addons
+topic readwrite #
 
 # --- Home Assistant (MQTT integration user) ------------------------------------
+# HA core uses this internal user for all MQTT devices, so it keeps full access
+# (covers the dashboard writes to timekpr/+/cmd and timekpr/+/set/#).
 user homeassistant
-topic read timekpr/#
-topic read homeassistant/#
-topic write homeassistant/#
-# dashboard buttons, number and select
-topic write timekpr/+/cmd
-topic write timekpr/+/set/#
+topic readwrite #
