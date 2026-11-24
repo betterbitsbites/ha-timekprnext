@@ -78,7 +78,9 @@ class InMemoryBus:
 
 
 class PahoBus:
-    """paho-mqtt 2.x client with a retained last will. paho is imported lazily."""
+    """paho-mqtt client with a retained last will. paho is imported lazily.
+
+    Works with paho 2.x (tk-budget's venv) and 1.x (Arch/Manjaro `python-paho-mqtt` 1.6)."""
 
     def __init__(self, host: str, port: int, username: str | None, password: str | None,
                  client_id: str, will_topic: str | None = None, will_payload: str | None = None) -> None:
@@ -86,12 +88,16 @@ class PahoBus:
 
         self._subs: list[tuple[str, Handler]] = []
         self._lock = threading.Lock()
-        self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
+        if hasattr(mqtt, "CallbackAPIVersion"):  # paho >= 2.0
+            self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
+            self._client.on_connect = self._on_connect_v2
+        else:  # paho 1.x
+            self._client = mqtt.Client(client_id=client_id)
+            self._client.on_connect = self._on_connect_v1
         if username:
             self._client.username_pw_set(username, password)
         if will_topic is not None:
             self._client.will_set(will_topic, will_payload or "", qos=1, retain=True)
-        self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
         self._client.reconnect_delay_set(min_delay=1, max_delay=60)
         self._client.connect_async(host, port, keepalive=60)
@@ -109,9 +115,15 @@ class PahoBus:
         self._client.loop_stop()
         self._client.disconnect()
 
-    def _on_connect(self, client, userdata, flags, reason_code, properties) -> None:  # noqa: ANN001
-        if reason_code.is_failure:
-            log.warning("MQTT connect failed: %s", reason_code)
+    def _on_connect_v2(self, client, userdata, flags, reason_code, properties) -> None:  # noqa: ANN001
+        self._connected(client, not reason_code.is_failure, reason_code)
+
+    def _on_connect_v1(self, client, userdata, flags, rc) -> None:  # noqa: ANN001
+        self._connected(client, rc == 0, f"rc={rc}")
+
+    def _connected(self, client, ok: bool, reason: object) -> None:  # noqa: ANN001
+        if not ok:
+            log.warning("MQTT connect failed: %s", reason)
             return
         log.info("MQTT connected")
         with self._lock:
