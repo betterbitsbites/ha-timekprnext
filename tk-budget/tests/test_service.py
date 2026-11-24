@@ -228,3 +228,14 @@ def test_discovery_has_all_entities():
     sw = by_id["tk_kid-a_limit_active"][1]
     assert sw["command_topic"] == discovery.set_topic(KID, "limit_active")
     assert (sw["payload_on"], sw["payload_off"]) == ("ON", "OFF")
+
+
+def test_upgrade_kid_with_budget_stays_limited(tmp_path):
+    # 0.2.0 stored budgets for configured kids but had no kids table and no limit switch
+    store = Store(str(tmp_path / "db.sqlite"))
+    store.set_setting("kid-b", "weekly_total_min", "120")
+    bus = InMemoryBus()
+    BudgetService(bus, store, FixedClock(MONDAY)).start()
+    report(bus, "pc1", 600, kid="kid-b")
+    assert remaining(bus, "kid-b") == Remaining(week="2026-W47", total_s=7200 - 600, limited=True)
+    assert store.get_setting("kid-b", "limit_active") == "ON"

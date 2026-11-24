@@ -90,6 +90,9 @@ class BudgetService:
         if kid not in self._kids:
             log.info("new kid %s (first reported by %s)", kid, host)
             self._store.add_kid(kid)
+            if (self._store.get_setting(kid, discovery.LIMIT_KEY) is None
+                    and self._store.get_setting(kid, "weekly_total_min") is not None):
+                self._store.set_setting(kid, discovery.LIMIT_KEY, "ON")  # kid limited before 0.3.0
             self._announce(kid)
         self._ledger.update(host, kid, u.week, u.total_s, u.day, u.total_day_s)
         self._store.save_usage(kid, host, u.week, u.total_s)
