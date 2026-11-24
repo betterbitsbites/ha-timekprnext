@@ -19,9 +19,11 @@ MONDAY = datetime(2026, 11, 16, 10, 0)
 def env(tmp_path):
     bus = InMemoryBus()
     store = Store(str(tmp_path / "db.sqlite"))
+    store.add_kid(KID)
     store.set_setting(KID, "weekly_total_min", "600")
+    store.set_setting(KID, "limit_active", "ON")
     clock = FixedClock(MONDAY)
-    svc = BudgetService(bus, store, clock, [KID])
+    svc = BudgetService(bus, store, clock)
     svc.start()
     return bus, store, clock, svc
 
@@ -30,9 +32,9 @@ def remaining(bus, kid=KID):
     return Remaining.from_json(bus.retained[topics.remaining(kid)])
 
 
-def report(bus, host, total_s, week="2026-W47", day="2026-11-16", day_s=None):
+def report(bus, host, total_s, week="2026-W47", day="2026-11-16", day_s=None, kid=KID):
     u = Usage(week=week, total_s=total_s, day=day, total_day_s=total_s if day_s is None else day_s)
-    bus.publish(topics.usage(host, KID), u.to_json(), retain=True)
+    bus.publish(topics.usage(host, kid), u.to_json(), retain=True)
 
 
 def test_initial_remaining_published_on_start(env):
@@ -81,8 +83,6 @@ def test_malformed_and_unknown_kid_ignored(env):
     before = remaining(bus)
     bus.publish(topics.usage("pc1", KID), "garbage", retain=True)
     bus.publish(topics.usage("pc1", KID), '{"week": "2026-W47"}', retain=True)
-    bus.publish(topics.usage("pc1", "x"),
-                Usage(week="2026-W47", total_s=5, day="2026-11-16", total_day_s=5).to_json(), retain=True)
     bus.publish(topics.cmd(KID), "garbage")
     bus.publish(topics.cmd("x"), Cmd(op="adjust_total", minutes=15).to_json())
     assert remaining(bus) == before
@@ -119,7 +119,7 @@ def test_restart_restores_state(env, tmp_path):
     report(bus, "pc1", 3600)
     expected = remaining(bus)
     bus2 = InMemoryBus()
-    BudgetService(bus2, store, clock, [KID]).start()
+    BudgetService(bus2, store, clock).start()
     assert remaining(bus2) == expected
 
 
@@ -141,10 +141,60 @@ def test_time_up_action_select_publishes_settings(env):
     assert Settings.from_json(bus.retained[topics.settings(KID)]) == Settings(time_up_action="shutdown")
 
 
-def test_unset_budget_fails_closed(tmp_path):
+def test_limit_on_without_budget_is_zero(tmp_path):
     bus = InMemoryBus()
-    BudgetService(bus, Store(str(tmp_path / "db.sqlite")), FixedClock(MONDAY), [KID]).start()
-    assert remaining(bus).total_s == 0
+    store = Store(str(tmp_path / "db.sqlite"))
+    BudgetService(bus, store, FixedClock(MONDAY)).start()
+    report(bus, "pc1", 60, kid="kid-b")
+    bus.publish(discovery.set_topic("kid-b", "limit_active"), "ON")
+    assert remaining(bus, "kid-b") == Remaining(week="2026-W47", total_s=0, limited=True)
+
+
+def test_kid_learned_from_usage_and_persisted(env):
+    bus, store, clock, _ = env
+    report(bus, "pc1", 60, kid="kid-b")
+    assert "homeassistant/switch/tk_kid-b/limit_active/config" in bus.retained
+    assert remaining(bus, "kid-b") == Remaining(week="2026-W47", total_s=0, limited=False)
+    assert store.kids() == ["kid-a", "kid-b"]
+    bus2 = InMemoryBus()
+    BudgetService(bus2, store, clock).start()
+    assert "homeassistant/switch/tk_kid-b/limit_active/config" in bus2.retained
+    assert remaining(bus2, "kid-b").limited is False
+
+
+@pytest.mark.parametrize("bad", ["_budget", "Kid", "a.b"])
+def test_invalid_kid_ignored(env, bad):
+    bus, store, *_ = env
+    report(bus, "pc1", 60, kid=bad)
+    assert store.kids() == ["kid-a"]
+    assert not any(t.startswith(f"homeassistant/switch/tk_{bad}/") for t in bus.retained)
+    assert topics.remaining(bad) not in bus.retained
+
+
+def test_cmd_and_set_for_unknown_kid_do_not_create_it(env):
+    bus, store, *_ = env
+    bus.publish(topics.cmd("kid-z"), Cmd(op="adjust_total", minutes=15).to_json())
+    bus.publish(discovery.set_topic("kid-z", "limit_active"), "ON")
+    assert store.kids() == ["kid-a"]
+    assert topics.remaining("kid-z") not in bus.retained
+
+
+def test_limit_off_means_unlimited(env):
+    bus, store, *_ = env
+    bus.publish(discovery.set_topic(KID, "limit_active"), "OFF")
+    assert remaining(bus) == Remaining(week="2026-W47", total_s=0, limited=False)
+    report(bus, "pc1", 600, day_s=600)
+    state = json.loads(bus.retained[discovery.state_topic(KID)])
+    assert state["today_s"] == 600 and state["limited"] is False
+    bus.publish(discovery.set_topic(KID, "limit_active"), "ON")
+    assert remaining(bus) == Remaining(week="2026-W47", total_s=36000 - 600, limited=True)
+
+
+def test_limit_active_rejects_other_payloads(env):
+    bus, store, *_ = env
+    bus.publish(discovery.set_topic(KID, "limit_active"), "maybe")
+    assert store.get_setting(KID, "limit_active") == "ON"
+    assert remaining(bus).limited is True
 
 
 def test_discovery_published_retained_on_start(env):
@@ -156,7 +206,7 @@ def test_discovery_published_retained_on_start(env):
 def test_discovery_has_all_entities():
     ents = discovery.entities(KID)
     by_id = {p["unique_id"]: (t, p) for t, p in ents}
-    assert len(ents) == 6
+    assert len(ents) == 7
     expected = {
         "tk_kid-a_remaining_total": "sensor",
         "tk_kid-a_total_today": "sensor",
@@ -164,6 +214,7 @@ def test_discovery_has_all_entities():
         "tk_kid-a_adjust_plus_15": "button",
         "tk_kid-a_adjust_minus_15": "button",
         "tk_kid-a_time_up_action": "select",
+        "tk_kid-a_limit_active": "switch",
     }
     for uid, component in expected.items():
         topic, payload = by_id[uid]
@@ -174,3 +225,6 @@ def test_discovery_has_all_entities():
     minus = by_id["tk_kid-a_adjust_minus_15"][1]
     assert Cmd.from_json(minus["payload_press"]) == Cmd(op="adjust_total", minutes=-15)
     assert by_id["tk_kid-a_time_up_action"][1]["options"] == ["shutdown", "lock", "terminate", "suspend"]
+    sw = by_id["tk_kid-a_limit_active"][1]
+    assert sw["command_topic"] == discovery.set_topic(KID, "limit_active")
+    assert (sw["payload_on"], sw["payload_off"]) == ("ON", "OFF")

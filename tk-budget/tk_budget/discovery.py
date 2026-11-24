@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from tk_protocol import topics
 from tk_protocol.payloads import Cmd
 
@@ -10,6 +12,12 @@ TIME_UP_ACTIONS = ["shutdown", "lock", "terminate", "suspend"]
 DEFAULT_TIME_UP_ACTION = "lock"  # chosen by the human partner
 MAX_WEEKLY_MIN = 7 * 24 * 60
 STATUS_TOPIC = f"{topics.PREFIX}/_budget/status"
+LIMIT_KEY = "limit_active"  # "ON"/"OFF"; off (default) = no limit
+_KID_RE = re.compile(r"^[a-z0-9-][a-z0-9_-]*$")  # leading "_" is reserved (`_budget`)
+
+
+def valid_kid(kid: str) -> bool:
+    return bool(_KID_RE.match(kid))
 
 
 def state_topic(kid: str) -> str:
@@ -18,7 +26,7 @@ def state_topic(kid: str) -> str:
 
 
 def set_topic(kid: str, key: str) -> str:
-    """Command topic HA writes to for a setting (`weekly_total_min`, `time_up_action`)."""
+    """Command topic HA writes to for a setting (`weekly_total_min`, `time_up_action`, `limit_active`)."""
     return f"{topics.PREFIX}/{kid}/set/{key}"
 
 
@@ -43,7 +51,7 @@ def entities(kid: str) -> list[tuple[str, dict]]:
 
     p = _base(kid, "remaining_total", "Remaining total")
     p.update(state_topic=st, unit_of_measurement="min", icon="mdi:timer-sand",
-             value_template="{{ (value_json.remaining_s / 60) | round(0) | int }}")
+             value_template="{{ ((value_json.remaining_s / 60) | round(0) | int) if value_json.limited else None }}")
     out.append((_topic("sensor", kid, "remaining_total"), p))
 
     p = _base(kid, "total_today", "Total time today")
@@ -70,5 +78,10 @@ def entities(kid: str) -> list[tuple[str, dict]]:
              value_template="{{ value_json.time_up_action }}", options=list(TIME_UP_ACTIONS),
              icon="mdi:power")
     out.append((_topic("select", kid, "time_up_action"), p))
+
+    p = _base(kid, LIMIT_KEY, "Limit active")
+    p.update(state_topic=st, command_topic=set_topic(kid, LIMIT_KEY), payload_on="ON", payload_off="OFF",
+             value_template="{{ 'ON' if value_json.limited else 'OFF' }}", icon="mdi:timer-lock")
+    out.append((_topic("switch", kid, LIMIT_KEY), p))
 
     return out

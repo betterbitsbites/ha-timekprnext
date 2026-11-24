@@ -38,15 +38,11 @@ def _blank_to_none(v: object) -> str | None:
 def load_options(path: str) -> dict:
     with open(path, encoding="utf-8") as f:
         opts = json.load(f)
-    kids = [str(k).strip() for k in opts.get("kids", []) if str(k).strip()]
-    if not kids:
-        raise SystemExit("tk-budget: option 'kids' is empty")
     return {
         "broker_host": _blank_to_none(opts.get("broker_host")),
         "broker_port": int(opts.get("broker_port") or 1883),
         "broker_user": _blank_to_none(opts.get("broker_user")),
         "broker_password": _blank_to_none(opts.get("broker_password")),
-        "kids": kids,
         "db_path": opts.get("db_path") or "/data/tk-budget.db",
     }
 
@@ -87,9 +83,9 @@ def main() -> None:
     store = Store(opts["db_path"])
     bus = PahoBus(broker["host"], broker["port"], broker["username"], broker["password"],
                   client_id="tk-budget", will_topic=discovery.STATUS_TOPIC, will_payload="offline")
-    service = BudgetService(bus, store, SystemClock(), opts["kids"])
+    service = BudgetService(bus, store, SystemClock())
     service.start()
-    log.info("tk-budget running for kids: %s", ", ".join(opts["kids"]))
+    log.info("tk-budget running; known kids: %s", ", ".join(store.kids()) or "none yet")
     while True:
         time.sleep(TICK_S)
         try:

@@ -19,7 +19,7 @@ class FakeFetch:
 
 
 def opts(**over):
-    base = {"kids": ["kid-a"], "db_path": "/data/x.db"}
+    base = {"db_path": "/data/x.db"}
     base.update(over)
     return base
 
@@ -62,3 +62,11 @@ def test_empty_option_strings_mean_unset(tmp_path):
     assert o["broker_host"] is None and o["broker_user"] is None and o["broker_password"] is None
     fetch = FakeFetch()
     assert resolve_broker(o, {"SUPERVISOR_TOKEN": "t"}, fetch)["host"] == "core-mosquitto"
+
+
+def test_options_without_kids_and_leftover_kids_ignored(tmp_path):
+    p = tmp_path / "options.json"
+    p.write_text(json.dumps({"db_path": "/data/x.db"}))
+    assert "kids" not in load_options(str(p))
+    p.write_text(json.dumps({"db_path": "/data/x.db", "kids": ["kid-a"]}))
+    assert "kids" not in load_options(str(p))

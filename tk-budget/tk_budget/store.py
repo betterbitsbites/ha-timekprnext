@@ -10,6 +10,7 @@ import sqlite3
 import threading
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS kids (kid TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS settings (
     kid TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
     PRIMARY KEY (kid, key));
@@ -35,6 +36,16 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._db.close()
+
+    def add_kid(self, kid: str) -> bool:
+        """Remember a kid; True if it was new."""
+        with self._lock:
+            cur = self._db.execute("INSERT OR IGNORE INTO kids (kid) VALUES (?)", (kid,))
+            return cur.rowcount == 1
+
+    def kids(self) -> list[str]:
+        with self._lock:
+            return [r[0] for r in self._db.execute("SELECT kid FROM kids ORDER BY kid")]
 
     def get_setting(self, kid: str, key: str, default: str | None = None) -> str | None:
         row = self._one("SELECT value FROM settings WHERE kid=? AND key=?", (kid, key))

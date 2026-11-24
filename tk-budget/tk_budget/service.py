@@ -1,4 +1,8 @@
-"""BudgetService: sums usage per kid and week, owns settings and adjustments, publishes remaining."""
+"""BudgetService: sums usage per kid and week, owns settings and adjustments, publishes remaining.
+
+Kids are learned from the agents' usage reports (any timekpr user on any PC) and persisted.
+A kid is limited only while its `limit_active` switch is on; otherwise remaining says unlimited.
+"""
 
 from __future__ import annotations
 
@@ -29,11 +33,11 @@ def _locked(fn):
 
 
 class BudgetService:
-    def __init__(self, bus: Bus, store: Store, clock: Clock, kids: list[str]) -> None:
+    def __init__(self, bus: Bus, store: Store, clock: Clock) -> None:
         self._bus = bus
         self._store = store
         self._clock = clock
-        self._kids = list(kids)
+        self._kids: list[str] = []
         self._ledger = UsageLedger()
         self._last: dict[str, tuple[str, str]] = {}  # kid -> (remaining json, state json)
         self._lock = threading.RLock()
@@ -43,15 +47,19 @@ class BudgetService:
         for kid, host, week, total_s in self._store.load_usage():
             self._ledger.restore(host, kid, week, total_s)
         self._bus.publish(discovery.STATUS_TOPIC, "online", retain=True)
-        for kid in self._kids:
-            for topic, payload in discovery.entities(kid):
-                self._bus.publish(topic, json.dumps(payload, sort_keys=True), retain=True)
-            self._publish_settings(kid)
-            self.republish(kid)
-        for kid in self._kids:
-            self._bus.subscribe(f"{topics.PREFIX}/+/{kid}/usage", self._on_usage)
-            self._bus.subscribe(topics.cmd(kid), self._on_cmd)
-            self._bus.subscribe(discovery.set_topic(kid, "+"), self._on_set)
+        for kid in self._store.kids():
+            self._announce(kid)
+        self._bus.subscribe(f"{topics.PREFIX}/+/+/usage", self._on_usage)
+        self._bus.subscribe(topics.cmd("+"), self._on_cmd)
+        self._bus.subscribe(discovery.set_topic("+", "+"), self._on_set)
+
+    def _announce(self, kid: str) -> None:
+        if kid not in self._kids:
+            self._kids.append(kid)
+        for topic, payload in discovery.entities(kid):
+            self._bus.publish(topic, json.dumps(payload, sort_keys=True), retain=True)
+        self._publish_settings(kid)
+        self.republish(kid)
 
     @_locked
     def tick(self) -> None:
@@ -68,7 +76,7 @@ class BudgetService:
     @_locked
     def _on_usage(self, topic: str, payload: str) -> None:
         parsed = topics.parse_usage_topic(topic)
-        if parsed is None or parsed[1] not in self._kids:
+        if parsed is None or not discovery.valid_kid(parsed[1]):
             return
         host, kid = parsed
         try:
@@ -79,6 +87,10 @@ class BudgetService:
         if u.week != self._week():
             log.info("ignoring usage for %s on %s (current week %s)", u.week, topic, self._week())
             return
+        if kid not in self._kids:
+            log.info("new kid %s (first reported by %s)", kid, host)
+            self._store.add_kid(kid)
+            self._announce(kid)
         self._ledger.update(host, kid, u.week, u.total_s, u.day, u.total_day_s)
         self._store.save_usage(kid, host, u.week, u.total_s)
         self._store.record_daily(kid, u.day, host, u.total_day_s)
@@ -118,6 +130,11 @@ class BudgetService:
                 return
             self._store.set_setting(kid, key, payload)
             self._publish_settings(kid)
+        elif key == discovery.LIMIT_KEY:
+            if payload not in ("ON", "OFF"):
+                log.warning("ignoring limit_active %r", payload)
+                return
+            self._store.set_setting(kid, key, payload)
         else:
             return
         self._publish(kid, force=False)
@@ -128,8 +145,11 @@ class BudgetService:
         return week_key(self._clock.now().date())
 
     def _budget_min(self, kid: str) -> int:
-        # Unset budget means 0: fail closed, never unlimited.
+        # Unset budget means 0 while the limit is on: fail closed.
         return int(self._store.get_setting(kid, "weekly_total_min", "0") or 0)
+
+    def _limited(self, kid: str) -> bool:
+        return self._store.get_setting(kid, discovery.LIMIT_KEY) == "ON"
 
     def _time_up_action(self, kid: str) -> str:
         return self._store.get_setting(kid, "time_up_action") or discovery.DEFAULT_TIME_UP_ACTION
@@ -144,11 +164,13 @@ class BudgetService:
         budget = self._budget_min(kid)
         adjustment = self._store.get_adjustment_s(kid, week)
         rem = remaining_total_s(budget, adjustment, self._ledger.used_s(kid, week))
-        rem_json = Remaining(week=week, total_s=rem).to_json()
+        limited = self._limited(kid)
+        rem_json = Remaining(week=week, total_s=rem if limited else 0, limited=limited).to_json()
         state_json = json.dumps({
             "week": week,
             "day": today.isoformat(),
             "weekly_total_min": budget,
+            "limited": limited,
             "adjustment_min": adjustment // 60,
             "remaining_s": rem,
             "today_s": sum(self._store.daily_totals(kid, today.isoformat()).values()),

@@ -1,5 +1,5 @@
 name: tk-budget
-version: "0.2.0"
+version: "0.3.0"
 slug: tk_budget
 description: Shared weekly screen-time budget for Timekpr-nExT clients
 url: https://github.com/<owner>/ha-timekprnext
@@ -13,13 +13,10 @@ boot: auto
 # Broker credentials come from the Mosquitto add-on via the Supervisor.
 services:
   - mqtt:need
+# Kids are not configured: every timekpr user reported by a PC appears automatically.
 options:
-  kids:
-    - kid-a
   db_path: /data/tk-budget.db
 schema:
-  kids:
-    - match(^[a-z0-9_-]+$)
   db_path: str
   # Only to use a broker other than the Mosquitto add-on:
   broker_host: str?
