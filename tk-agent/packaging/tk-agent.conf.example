@@ -1,20 +1,18 @@
 # /etc/tk-agent.conf — mode 600, root:root (holds MQTT credentials).
+# The same file works on every PC: kids are timekpr's users (`timekpra --userlist`),
+# and the PC's id comes from its host name.
 
 [broker]
 # With the Mosquitto add-on: the Home Assistant host, port 1883, and the HA user
-# created for this PC (Settings → People → Users).
+# shared by all PCs (Settings → People → Users).
 host = <ha-host>
 port = 1883
-username = tk-agent-<client-host>
+username = tk-agent
 password = <ha-user-password>
 
 [agent]
-# Unique id of this PC, [a-z0-9_-]+, must differ from every kid id.
-host_id = <client-host>
 # Poll/report interval in seconds (30..60).
 interval_s = 45
 # state_dir = /var/lib/tk-agent
-
-[kids]
-# <timekpr user on this PC> = <kid id used in tk-budget and HA>
-<kid-user> = kid-a
+# Only if the host name is unsuitable ([a-z0-9_-]+ after lower-casing, must differ from every user name):
+# host_id = <client-host>

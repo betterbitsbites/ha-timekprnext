@@ -2,6 +2,8 @@
 
 Status: DRAFT for approval (2026-11-16). Nothing is built yet. Supersedes the draft in `ARCHITECTURE.md` where they differ.
 
+Amended by `2026-11-24-auto-users-design.md`: kids are timekpr's users (auto-discovered), limits are opt-in per kid, all PCs share one login.
+
 ## Intent
 
 Today the parent logs in to a kid's Linux PC over SSH and changes limits with `timekpra` on the CLI. That is slow and unusable on a phone. The goal is to view and change screen time comfortably on a Home Assistant (HA) dashboard, also from outside the house, with **one shared time budget per kid across all PCs**, and to keep daily statistics per kid.
