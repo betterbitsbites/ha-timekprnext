@@ -34,8 +34,9 @@ def main() -> None:
     bus = PahoBus(cfg.broker_host, cfg.broker_port, cfg.username, cfg.password,
                   client_id=f"tk-agent-{cfg.host_id}",
                   will_topic=topics.status(cfg.host_id), will_payload="offline")
+    # meter names: `<user>` (total) and `<user>.play` (PlayTime), each in `<state_dir>/<name>.json`
     agent = Agent(cfg, bus, Timekpra(),
-                  lambda user: UsageMeter(os.path.join(cfg.state_dir, f"{user}.json"), clock), clock, Loginctl())
+                  lambda name: UsageMeter(os.path.join(cfg.state_dir, f"{name}.json"), clock), clock, Loginctl())
     agent.start()
     log.info("tk-agent %s running for all timekpr users", cfg.host_id)
     while True:

@@ -24,6 +24,10 @@ class FakeTimekpra:
     def __init__(self, clock: FixedClock, left: int = 86400) -> None:
         self.clock = clock
         self.left = left
+        self.play_left = 86400  # PlayTime left; timekpr shows it capped by the total time left
+        self.play_writes: list[tuple[str, int]] = []
+        self.play_enabled = True  # False: PlayTime off in timekpr, play left reads 0, writes ignored
+        self.play_consumed = 0
         self.writes: list[tuple[str, int]] = []
         self.lockouts: list[tuple[str, str]] = []
         self.consumed = 0
@@ -55,9 +59,25 @@ class FakeTimekpra:
     def set_lockout_type(self, user: str, value: str) -> None:
         self.lockouts.append((user, value))
 
-    def run(self, seconds: int) -> None:
-        """User active for `seconds`; the clock advances too."""
+    def play_left_s(self, user: str) -> int | None:
+        if user in self.logged_out:
+            return None
+        if not self.play_enabled:
+            return 0
+        return min(self.play_left, self.time_left_s(user))
+
+    def set_play_left_s(self, user: str, seconds: int) -> None:
+        self.play_writes.append((user, seconds))
+        if user not in self.logged_out and self.play_enabled:
+            self.play_left = seconds
+
+    def run(self, seconds: int, playing: bool = True) -> None:
+        """User active for `seconds` (playing: a PlayTime activity runs); the clock advances too."""
         used = min(seconds, self.time_left_s(USER))
+        if playing and self.play_enabled:
+            played = min(seconds, self.play_left_s(USER))
+            self.play_left -= played
+            self.play_consumed += played
         self.left -= used
         self.consumed += used
         self.clock.set(self.clock.now() + timedelta(seconds=seconds))
@@ -216,7 +236,7 @@ def test_usage_published_cumulative_and_retained(env):
     agent.tick()
     tk.run(45)
     agent.tick()
-    assert usage(bus) == Usage(week=WEEK, total_s=90, day="2026-11-16", total_day_s=90)
+    assert usage(bus) == Usage(week=WEEK, total_s=90, day="2026-11-16", total_day_s=90, play_s=90, play_day_s=90)
     assert (topics.usage(HOST, KID), usage(bus).to_json(), True) in bus.published
 
 
@@ -580,3 +600,244 @@ def test_action_triggers_republish_next_tick(senv):
     action(bus, "end_inactive", clock.now().isoformat())
     agent.tick()
     assert published_sessions(bus) == [Sessions(1, 1), Sessions(1, 1)]
+
+
+# --- play time --------------------------------------------------------------------------
+
+def send_play(bus, play_s, play_limited=True, total_s=0, limited=False, week=WEEK):
+    bus.publish(topics.remaining(KID), Remaining(week=week, total_s=total_s, limited=limited, play_s=play_s,
+                                                 play_limited=play_limited).to_json(), retain=True)
+
+
+def play_warnings(caplog):
+    return [r for r in caplog.records if "PlayTime seems off" in r.getMessage()]
+
+
+def test_play_usage_reported_only_while_playing(env):
+    agent, bus, tk, _ = env
+    tk.play_left = 3600  # below the total time left, so the total cap does not move play left
+    agent.start()
+    agent.tick()
+    tk.run(100, playing=True)
+    agent.tick()
+    tk.run(50, playing=False)
+    agent.tick()
+    assert usage(bus) == Usage(week=WEEK, total_s=150, day="2026-11-16", total_day_s=150,
+                               play_s=100, play_day_s=100)
+
+
+def test_play_off_in_timekpr_measures_no_play(env):
+    agent, bus, tk, _ = env
+    tk.play_enabled = False
+    agent.start()
+    for _ in range(3):
+        agent.tick()
+        tk.run(45)
+    agent.tick()
+    assert usage(bus).play_s == 0 and usage(bus).play_day_s == 0
+    assert usage(bus).total_s == 135
+
+
+def test_play_limit_enforced_from_receipt(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_play(bus, 1800)
+    agent.tick()
+    assert tk.play_writes == [(USER, 1800)]
+    tk.run(600)
+    agent.tick()
+    assert tk.play_writes == [(USER, 1800)]  # timekpr counts down itself
+    tk.play_left = 17000  # timekpr hands out its own value again (e.g. a PlayTime reset)
+    agent.tick()
+    assert len(tk.play_writes) == 2 and abs(tk.play_writes[-1][1] - 1200) < 60
+    assert usage(bus).play_s == 600
+    assert tk.writes == []  # total unlimited from the start: never written
+
+
+def test_play_snapshot_after_playing_writes_rest(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    agent.tick()
+    tk.run(600)
+    agent.tick()
+    send_play(bus, 1200)  # tk-budget already subtracted the 600 s
+    agent.tick()
+    assert tk.play_writes == [(USER, 1200)]
+
+
+def test_play_unlimited_from_start_never_writes(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_play(bus, 0, play_limited=False)
+    for _ in range(3):
+        agent.tick()
+        tk.run(45)
+    agent.tick()
+    assert tk.play_writes == [] and tk.writes == []
+
+
+def test_play_release_once_even_after_restart(env, tmp_path):
+    agent, bus, tk, clock = env
+    agent.start()
+    send_play(bus, 0)
+    agent.tick()
+    assert tk.play_writes == [(USER, 0)]
+    send_play(bus, 0, play_limited=False)
+    agent.tick()
+    agent.tick()
+    assert tk.play_writes == [(USER, 0), (USER, 86400)]
+    agent2 = new_agent(agent, bus, tk, clock, tmp_path)
+    agent2.start()
+    agent2.tick()
+    assert tk.play_writes == [(USER, 0), (USER, 86400)]
+    assert tk.writes == []
+
+
+def test_play_release_ignores_unenforceable_guard(env):
+    agent, bus, tk, _ = env
+    tk.play_enabled = False
+    agent.start()
+    send_play(bus, 600)
+    agent.tick()
+    send_play(bus, 0, play_limited=False)
+    agent.tick()
+    agent.tick()
+    assert tk.play_writes == [(USER, 600), (USER, 86400)]
+
+
+def test_play_off_in_timekpr_one_write_and_one_warning_per_snapshot(env, caplog):
+    agent, bus, tk, _ = env
+    tk.play_enabled = False
+    agent.start()
+    send_play(bus, 1800)
+    with caplog.at_level("WARNING"):
+        for _ in range(5):
+            agent.tick()
+            tk.run(45)
+    assert tk.play_writes == [(USER, 1800)]
+    assert len(play_warnings(caplog)) == 1
+    send_play(bus, 1500)  # new play snapshot: try again once
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            agent.tick()
+    assert tk.play_writes == [(USER, 1800), (USER, 1500)]
+    assert len(play_warnings(caplog)) == 2
+
+
+def test_play_unenforceable_retried_next_day(env, caplog):
+    agent, bus, tk, clock = env
+    tk.play_enabled = False
+    agent.start()
+    send_play(bus, 1800, week="2026-W47")
+    with caplog.at_level("WARNING"):
+        agent.tick()
+        agent.tick()
+        clock.set(datetime(2026, 11, 17, 10, 0))
+        agent.tick()
+        agent.tick()
+    assert tk.play_writes == [(USER, 1800), (USER, 1800)]
+    assert len(play_warnings(caplog)) == 2
+
+
+def test_play_capped_by_total_is_not_unenforceable(env, caplog):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_play(bus, 1800, total_s=600, limited=True)
+    with caplog.at_level("WARNING"):
+        for _ in range(4):
+            agent.tick()
+            tk.run(45)
+    assert tk.writes == [(USER, 600)]
+    assert tk.play_writes == [(USER, 1800)]  # timekpr shows min(play, total): no rewrite each tick
+    assert play_warnings(caplog) == []
+
+
+def test_play_change_keeps_total_receipt(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_play(bus, 1800, total_s=5400, limited=True)
+    agent.tick()
+    tk.run(600)
+    agent.tick()
+    send_play(bus, 3000, total_s=5400, limited=True)  # only the play part changed
+    agent.tick()
+    assert tk.writes == [(USER, 5400)]  # a reset total receipt would write 5400 again
+    assert tk.play_writes[-1] == (USER, 3000)
+
+
+def test_total_change_keeps_play_receipt(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_play(bus, 1800, total_s=5400, limited=True)
+    agent.tick()
+    tk.run(600)
+    agent.tick()
+    send_play(bus, 1800, total_s=3000, limited=True)  # only the total part changed
+    agent.tick()
+    assert tk.writes[-1] == (USER, 3000)
+    assert tk.play_writes == [(USER, 1800)]  # play still 1200 left, a reset would write 1800
+
+
+def test_play_redelivery_keeps_play_receipt(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_play(bus, 1800)
+    agent.tick()
+    tk.run(600)
+    agent.tick()
+    send_play(bus, 1800)  # retained value re-delivered
+    tk.play_left = 17000
+    agent.tick()
+    assert abs(tk.play_writes[-1][1] - 1200) < 60
+
+
+def test_total_only_snapshot_keeps_play_untouched(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_remaining(bus, 600)
+    for _ in range(3):
+        agent.tick()
+        tk.run(45)
+    send_remaining(bus, 0, limited=False)
+    agent.tick()
+    assert tk.play_writes == []
+
+
+def test_play_survives_unlimited_total(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_play(bus, 900, total_s=0, limited=False)
+    agent.tick()
+    assert tk.play_writes == [(USER, 900)] and tk.writes == []
+
+
+def test_old_snapshot_file_without_play_keys_loads(env, tmp_path):
+    agent, bus, tk, clock = env
+    (tmp_path / f"{USER}.remaining.json").write_text(json.dumps(
+        {"week": WEEK, "total_s": 600, "receipt_week": WEEK, "receipt_usage_s": 0, "limited": True,
+         "released": True}))
+    agent.tick()
+    assert tk.writes == [(USER, 600)]
+    assert tk.play_writes == []
+
+
+def test_play_meter_uses_own_state_file(env, tmp_path):
+    agent, bus, tk, _ = env
+    agent.start()
+    agent.tick()
+    tk.run(100)
+    agent.tick()
+    assert (tmp_path / f"{USER}.play.json").exists()
+    assert json.loads((tmp_path / f"{USER}.play.json").read_text())["week_total_s"] == 100
+
+
+def test_play_not_written_while_logged_out(env):
+    agent, bus, tk, _ = env
+    tk.logged_out.add(USER)
+    agent.start()
+    send_play(bus, 600)
+    agent.tick()
+    assert tk.play_writes == []
+    tk.logged_out.discard(USER)
+    agent.tick()
+    assert tk.play_writes == [(USER, 600)]

@@ -74,3 +74,26 @@ def test_timekpra_users_without_header_raises():
 
 def test_timekpra_users_single_user_header():
     assert Timekpra(FakeRunner("1 user in total:\nkid-a\n\n")).users() == ["kid-a"]
+
+
+def test_parse_play_left_from_fixture():
+    run = FakeRunner((FIXTURES / "getuserinfort-play.txt").read_text())
+    assert Timekpra(run).play_left_s("kid-a") == 17316
+    assert run.calls == [["--getuserinfort", "kid-a"]]
+
+
+def test_play_left_of_logged_out_user_is_none():
+    run = FakeRunner((FIXTURES / "getuserinfort-logged-out.txt").read_text())
+    assert Timekpra(run).play_left_s("kid-a") is None
+
+
+def test_play_left_missing_field_raises():
+    with pytest.raises(TimekpraError):
+        Timekpra(FakeRunner("# Configuration for user x:\nACTUAL_TIME_LEFT_DAY: 5\n")).play_left_s("x")
+
+
+def test_set_play_left_builds_expected_command():
+    run = FakeRunner()
+    Timekpra(run).set_play_left_s("kid-a", 600)
+    Timekpra(run).set_play_left_s("kid-a", -5)
+    assert run.calls == [["--setplaytimeleft", "kid-a", "=", "600"], ["--setplaytimeleft", "kid-a", "=", "0"]]

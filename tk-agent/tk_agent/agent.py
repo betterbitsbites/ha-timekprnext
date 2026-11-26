@@ -8,6 +8,12 @@ so a reboot without a broker keeps enforcing it.
 Users: every timekpr user (`timekpra --userlist`) is a kid with the same id. A kid is enforced
 only while tk-budget says `limited`; unlimited kids are measured but never written to, except
 once on the change limited -> unlimited, which hands back a full day so a locked kid is free.
+
+Play time (timekpr's PlayTime) is a second, independent part of the same snapshot: its own
+meter (`<user>.play`), its own receipt point and its own release. timekpr shows play left
+capped by the total time left, so the play target is compared against that cap. If a play
+write does not stick (PlayTime off in timekpr), play is left alone until a new play
+snapshot or the next day; play usage is still measured and reported.
 """
 
 from __future__ import annotations
@@ -47,6 +53,8 @@ class TimekpraLike(Protocol):
     def time_left_s(self, user: str) -> int | None: ...
     def set_time_left_s(self, user: str, seconds: int) -> None: ...
     def set_lockout_type(self, user: str, value: str) -> None: ...
+    def play_left_s(self, user: str) -> int | None: ...
+    def set_play_left_s(self, user: str, seconds: int) -> None: ...
 
 
 class SessionsLike(Protocol):
@@ -63,6 +71,16 @@ class _Snapshot:
     receipt_usage_s: int  # meter week total when received
     limited: bool = True
     released: bool = True  # unlimited only: the one release write is done (or was never needed)
+    play_s: int = 0
+    play_limited: bool = False
+    play_receipt_week: str = ""  # play meter week when the play part was received
+    play_receipt_usage_s: int = 0  # play meter week total when the play part was received
+    play_released: bool = True  # play unlimited only: like `released`
+
+
+def _same_part(old_limited: bool, new_limited: bool, old_key: tuple, new_key: tuple) -> bool:
+    """A snapshot part is unchanged if both are unlimited, or both limited with the same (week, seconds)."""
+    return old_limited == new_limited and (not new_limited or old_key == new_key)
 
 
 def _locked(fn):
@@ -90,6 +108,9 @@ class Agent:
         self._warned: set[str] = set()
         # per-user state, created when a user first appears in timekpr's list
         self._meters: dict[str, UsageMeter] = {}
+        self._play_meters: dict[str, UsageMeter] = {}
+        self._play_off: dict[str, str | None] = {}  # day play was found unenforceable, None = fine
+        self._play_warned: set[str] = set()  # play_left_s failed (warned once)
         self._snap: dict[str, _Snapshot | None] = {}
         self._action_wanted: dict[str, str | None] = {}
         self._action_applied: dict[str, str | None] = {}
@@ -138,6 +159,8 @@ class Agent:
 
     def _add_user(self, user: str) -> None:
         self._meters[user] = self._meter_factory(user)
+        self._play_meters[user] = self._meter_factory(f"{user}.play")
+        self._play_off[user] = None
         self._snap[user] = self._load_snapshot(user)
         self._action_wanted[user] = self._action_applied[user] = None
         self._low_sent[user] = self._up_sent[user] = False
@@ -159,12 +182,18 @@ class Agent:
 
     def _tick_user(self, user: str) -> None:
         kid = user
-        meter = self._meters[user]
+        meter, pmeter = self._meters[user], self._play_meters[user]
         left = self._tk.time_left_s(user)
+        play_left = None
         if left is not None:
             meter.observe(left)
+            play_left = self._read_play_left(user)
+            if play_left is not None:
+                pmeter.observe(play_left)
         week, day = meter.current_week(), meter.current_day()
-        u = Usage(week=week, total_s=meter.week_total_s(week), day=day, total_day_s=meter.day_total_s(day))
+        pweek, pday = pmeter.current_week(), pmeter.current_day()
+        u = Usage(week=week, total_s=meter.week_total_s(week), day=day, total_day_s=meter.day_total_s(day),
+                  play_s=pmeter.week_total_s(pweek), play_day_s=pmeter.day_total_s(pday))
         self._bus.publish(topics.usage(self.cfg.host_id, kid), u.to_json(), retain=True)
         self._report_sessions(user)
         if left is None:
@@ -173,24 +202,78 @@ class Agent:
         snap = self._snap[user]
         if snap is None:
             return  # nothing known yet: leave timekpr untouched
+        cap = self._enforce_total(user, kid, snap, left, u)
+        if play_left is not None:
+            self._enforce_play(user, snap, play_left, cap)
+
+    def _enforce_total(self, user: str, kid: str, snap: _Snapshot, left: int, u: Usage) -> int:
+        """Enforce the total part; returns the total time left expected in timekpr after this tick."""
         if not snap.limited:
             if not snap.released:
                 self._tk.set_time_left_s(user, MAX_TIME_LEFT_S)  # limit lifted: free a locked kid once
-                self._wrote(user)
+                back = self._wrote(user)
                 snap.released = True
                 self._save_snapshot(user, snap)
-            return
+                return left if back is None else back
+            return left
         wanted = self._action_wanted[user]  # timekpr settings are only touched while limited
         if wanted is not None and wanted != self._action_applied[user]:
             self._tk.set_lockout_type(user, wanted)
             self._action_applied[user] = wanted
-        since = u.total_s - snap.receipt_usage_s if snap.receipt_week == week else u.total_s
+        since = u.total_s - snap.receipt_usage_s if snap.receipt_week == u.week else u.total_s
         target = min(max(0, snap.total_s - max(0, since)), MAX_TIME_LEFT_S)
         expected = min(target, self._seconds_to_midnight())  # timekpr caps time left at midnight
+        cap = left
         if abs(expected - left) >= WRITE_TOLERANCE_S or (target == 0 and left > 0):
             self._tk.set_time_left_s(user, target)
-            self._wrote(user)
+            back = self._wrote(user)
+            cap = expected if back is None else back
         self._events(user, kid, target)
+        return cap
+
+    def _enforce_play(self, user: str, snap: _Snapshot, play_left: int, cap: int) -> None:
+        """Enforce the play part; `cap` is the total time left timekpr caps play left with."""
+        pmeter = self._play_meters[user]
+        if not snap.play_limited:
+            if not snap.play_released:
+                self._tk.set_play_left_s(user, MAX_TIME_LEFT_S)  # play limit lifted: once, even if PlayTime is off
+                self._play_wrote(user)
+                snap.play_released = True
+                self._save_snapshot(user, snap)
+            return
+        today = pmeter.current_day()
+        if self._play_off[user] == today:
+            return  # a play write did not stick today: leave PlayTime alone until a new play snapshot
+        self._play_off[user] = None
+        week = pmeter.current_week()
+        used = pmeter.week_total_s(week)
+        since = used - snap.play_receipt_usage_s if snap.play_receipt_week == week else used
+        target = min(max(0, snap.play_s - max(0, since)), MAX_TIME_LEFT_S)
+        expected = min(target, cap)
+        if abs(expected - play_left) >= WRITE_TOLERANCE_S or (target == 0 and play_left > 0):
+            self._tk.set_play_left_s(user, target)
+            back = self._play_wrote(user)
+            if back is not None and abs(back - expected) >= WRITE_TOLERANCE_S:
+                self._play_off[user] = today
+                log.warning("PlayTime seems off in timekpr for %s: wrote %d s play left, read back %d s; "
+                            "not enforcing play until a new play limit or tomorrow", user, target, back)
+
+    def _read_play_left(self, user: str) -> int | None:
+        try:
+            value = self._tk.play_left_s(user)
+        except Exception as e:
+            if user not in self._play_warned:
+                self._play_warned.add(user)
+                log.warning("cannot read play time left for %s (%s); not measuring play", user, e)
+            return None
+        self._play_warned.discard(user)
+        return value
+
+    def _play_wrote(self, user: str) -> int | None:
+        back = self._read_play_left(user)  # read back: exit codes prove nothing
+        if back is not None:
+            self._play_meters[user].wrote(back)
+        return back
 
     def _report_sessions(self, user: str) -> None:
         if self._sessions is None:
@@ -208,10 +291,11 @@ class Agent:
             self._bus.publish(topics.sessions(self.cfg.host_id, user), report.to_json(), retain=True)
             self._sess_sent[user] = report
 
-    def _wrote(self, user: str) -> None:
+    def _wrote(self, user: str) -> int | None:
         back = self._tk.time_left_s(user)  # read back: exit codes prove nothing
         if back is not None:  # None: logged out in between; the next login tick observes afresh
             self._meters[user].wrote(back)
+        return back
 
     def _events(self, user: str, kid: str, target: int) -> None:
         if target > TIME_LOW_S:
@@ -247,21 +331,29 @@ class Agent:
             log.warning("ignoring malformed remaining on %s: %s", topic, e)
             return
         old = self._snap[user]
-        meter = self._meters[user]
-        week = meter.current_week()
-        if not r.limited:
-            if old is not None and not old.limited:
-                return  # still unlimited: keep the release state
+        snap = _Snapshot(**old.__dict__) if old is not None else _Snapshot(r.week, 0, "", 0)
+        snap.week = r.week
+        if old is None or not _same_part(old.limited, r.limited, (old.week, old.total_s), (r.week, r.total_s)):
+            # new total part (a re-delivered retained value keeps the original receipt point)
+            meter = self._meters[user]
+            snap.receipt_week = meter.current_week()
+            snap.receipt_usage_s = meter.week_total_s(snap.receipt_week)
+            snap.limited = r.limited
+            snap.total_s = r.total_s if r.limited else 0
             # release only if this PC enforced a limit before; never touch an always-unlimited user
-            snap = _Snapshot(r.week, 0, week, meter.week_total_s(week), limited=False, released=old is None)
+            snap.released = r.limited or old is None or not old.limited
+        if old is None or not _same_part(old.play_limited, r.play_limited, (old.week, old.play_s),
+                                         (r.week, r.play_s)):
+            pmeter = self._play_meters[user]
+            snap.play_receipt_week = pmeter.current_week()
+            snap.play_receipt_usage_s = pmeter.week_total_s(snap.play_receipt_week)
+            snap.play_limited = r.play_limited
+            snap.play_s = r.play_s if r.play_limited else 0
+            snap.play_released = r.play_limited or old is None or not old.play_limited
+            self._play_off[user] = None  # a new play snapshot: try enforcing play again
+        if snap != old:
             self._snap[user] = snap
             self._save_snapshot(user, snap)
-            return
-        if old is not None and old.limited and (old.week, old.total_s) == (r.week, r.total_s):
-            return  # re-delivered retained value (reconnect): keep the original receipt point
-        snap = _Snapshot(r.week, r.total_s, week, meter.week_total_s(week))
-        self._snap[user] = snap
-        self._save_snapshot(user, snap)
 
     @_locked
     def _on_settings(self, topic: str, payload: str) -> None:
@@ -291,6 +383,7 @@ class Agent:
         except ValueError:
             return
         self._meters[user].seed(u.week, u.total_s, u.day, u.total_day_s)
+        self._play_meters[user].seed(u.week, u.play_s, u.day, u.play_day_s)
 
     @_locked
     def _on_action(self, topic: str, payload: str) -> None:
@@ -335,7 +428,10 @@ class Agent:
             with open(self._snapshot_path(user), encoding="utf-8") as f:
                 d = json.load(f)
             return _Snapshot(str(d["week"]), int(d["total_s"]), str(d["receipt_week"]), int(d["receipt_usage_s"]),
-                             bool(d.get("limited", True)), bool(d.get("released", True)))
+                             bool(d.get("limited", True)), bool(d.get("released", True)),
+                             int(d.get("play_s", 0)), bool(d.get("play_limited", False)),
+                             str(d.get("play_receipt_week", "")), int(d.get("play_receipt_usage_s", 0)),
+                             bool(d.get("play_released", True)))
         except FileNotFoundError:
             return None
         except (OSError, ValueError, KeyError, TypeError) as e:
