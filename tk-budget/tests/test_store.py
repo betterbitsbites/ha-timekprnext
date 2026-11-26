@@ -59,3 +59,11 @@ def test_add_kid_reports_new_once(tmp_path):
     assert s.add_kid("kid-b") is False
     assert s.add_kid("kid-a") is True
     assert s.kids() == ["kid-a", "kid-b"]
+
+
+def test_day_adjustments_accumulate_per_day(tmp_path):
+    s = Store(str(tmp_path / "db.sqlite"))
+    assert s.add_day_adjustment_s("k", "2026-11-16", 900) == 900
+    assert s.add_day_adjustment_s("k", "2026-11-16", 900) == 1800
+    assert s.get_day_adjustment_s("k", "2026-11-16") == 1800
+    assert s.get_day_adjustment_s("k", "2026-11-17") == 0

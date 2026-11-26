@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS adjustments (
     kid TEXT NOT NULL, week TEXT NOT NULL, adjustment_s INTEGER NOT NULL,
     PRIMARY KEY (kid, week));
+CREATE TABLE IF NOT EXISTS day_adjustments (
+    kid TEXT NOT NULL, day TEXT NOT NULL, adjustment_s INTEGER NOT NULL,
+    PRIMARY KEY (kid, day));
 CREATE TABLE IF NOT EXISTS usage (
     kid TEXT NOT NULL, host TEXT NOT NULL, week TEXT NOT NULL, total_s INTEGER NOT NULL,
     PRIMARY KEY (kid, host, week));
@@ -64,6 +67,16 @@ class Store:
                    "ON CONFLICT (kid, week) DO UPDATE SET adjustment_s=adjustment_s+excluded.adjustment_s",
                    (kid, week, delta_s))
         return self.get_adjustment_s(kid, week)
+
+    def get_day_adjustment_s(self, kid: str, day: str) -> int:
+        row = self._one("SELECT adjustment_s FROM day_adjustments WHERE kid=? AND day=?", (kid, day))
+        return row[0] if row else 0
+
+    def add_day_adjustment_s(self, kid: str, day: str, delta_s: int) -> int:
+        self._exec("INSERT INTO day_adjustments (kid, day, adjustment_s) VALUES (?, ?, ?) "
+                   "ON CONFLICT (kid, day) DO UPDATE SET adjustment_s=adjustment_s+excluded.adjustment_s",
+                   (kid, day, delta_s))
+        return self.get_day_adjustment_s(kid, day)
 
     def record_daily(self, kid: str, day: str, host: str, total_s: int) -> None:
         self._exec("INSERT INTO daily (kid, day, host, total_s) VALUES (?, ?, ?, ?) "

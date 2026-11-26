@@ -2,13 +2,40 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from tk_protocol.clock import week_key
 
-__all__ = ["UsageLedger", "remaining_total_s", "week_key"]
+__all__ = ["Limit", "UsageLedger", "effective", "limit", "remaining_total_s", "week_key"]
 
 
 def remaining_total_s(weekly_budget_min: int, adjustment_s: int, used_s: int) -> int:
     return max(0, weekly_budget_min * 60 + adjustment_s - used_s)
+
+
+@dataclass(frozen=True)
+class Limit:
+    key: str  # "week" | "day" | "combined"
+    active: bool
+    allowance_s: int  # limit + adjustment, >= 0
+    remaining_s: int  # max(0, allowance - used)
+
+    @property
+    def pct(self) -> int:
+        if self.allowance_s == 0:
+            return 0
+        return max(0, min(100, round(100 * self.remaining_s / self.allowance_s)))
+
+
+def limit(key: str, active: bool, limit_min: int, adjustment_s: int, used_s: int) -> Limit:
+    allowance = max(0, limit_min * 60 + adjustment_s)
+    return Limit(key, active, allowance, max(0, allowance - used_s))
+
+
+def effective(limits: list[Limit]) -> tuple[bool, int]:
+    """(any limit active, smallest remaining over the active limits; 0 if none)."""
+    remaining = [lim.remaining_s for lim in limits if lim.active]
+    return (True, min(remaining)) if remaining else (False, 0)
 
 
 class UsageLedger:

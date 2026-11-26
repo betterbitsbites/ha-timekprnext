@@ -1,6 +1,6 @@
 from datetime import date
 
-from tk_budget.engine import UsageLedger, remaining_total_s, week_key
+from tk_budget.engine import Limit, UsageLedger, effective, limit, remaining_total_s, week_key
 
 
 def test_week_key_monday_start():
@@ -67,3 +67,28 @@ def test_ledger_restore_week_total_only():
     assert led.used_s("kid-a", "2026-W47") == 3600
     assert led.update("pc1", "kid-a", "2026-W47", 3000, "2026-11-16", 10) is True  # day is new
     assert led.used_s("kid-a", "2026-W47") == 3600
+
+
+def test_limit_with_adjustment():
+    lim = limit("day", True, 120, 900, 3000)
+    assert lim == Limit("day", True, 8100, 5100)
+    assert lim.pct == 63
+
+
+def test_limit_clamped_at_zero():
+    lim = limit("week", True, 10, -100000, 0)
+    assert lim.allowance_s == 0
+    assert lim.remaining_s == 0
+    assert lim.pct == 0
+
+
+def test_effective_minimum_of_active():
+    assert effective([limit("week", True, 600, 0, 3600), limit("day", True, 60, 0, 600)]) == (True, 3000)
+
+
+def test_effective_ignores_inactive():
+    assert effective([limit("week", False, 600, 0, 0), limit("day", True, 60, 0, 0)]) == (True, 3600)
+
+
+def test_effective_none_active():
+    assert effective([limit("week", False, 600, 0, 0)]) == (False, 0)
