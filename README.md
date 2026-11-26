@@ -34,9 +34,35 @@ Without an ACL every MQTT user may read and write every topic (the add-on's defa
 1. HA → Settings → Add-ons → Add-on store → ⋮ → Repositories → add this repository's URL.
 2. Install **tk-budget**, set the options:
    - `db_path`: keep `/data/tk-budget.db` (statistics live there and are kept with add-on backups)
+   - `familylink`: optional, kids with a Google Family Link sensor (see below)
    - `broker_host` / `broker_port` / `broker_user` / `broker_password`: leave empty; only to use a broker other than the Mosquitto add-on
-3. Start it. The log shows `using MQTT broker core-mosquitto:1883 as addons`. Once the PCs report, per user a device "Screen time <user>" appears with: Limit active, Remaining total, Total time today, Weekly total budget, +15 min, −15 min, Time-up action.
-4. For each kid: set the weekly total budget, then turn on "Limit active".
+3. Start it. The log shows `using MQTT broker core-mosquitto:1883 as addons`. Once the PCs report, per user a device "Screen time <user>" appears with: the limit numbers and switches below, Remaining total, Remaining this week / today, Week left / Today left (percent), Total time today, +15 min, −15 min, Time-up action.
+4. For each kid: set a limit and turn on its switch.
+
+### Limits
+
+Each limit is a number plus a switch; a limit applies only while its switch is on (default off). The effective "Remaining total" is the smallest remaining time of all active limits.
+
+| Limit | Number | Switch |
+|---|---|---|
+| Weekly (all PCs) | Weekly total budget | Weekly limit active |
+| Daily (all PCs) | Daily total limit | Daily limit active |
+| Daily, PC + phone (Family Link kids only) | Daily combined limit | Combined limit active |
+
+Per limit there is a sensor "Remaining this week / today / combined" (minutes) and a percent sensor "Week left / Today left / Combined left" (state: percent of that limit left, unknown while the limit is off; attributes `remaining_min` and `limit_min`). The +15 / −15 min buttons add to this week's and today's allowance only; they do not change the saved limits.
+
+### Phone time from Google Family Link (optional)
+
+1. Install the HACS integration "Google Family Link" (github.com/noiwid/HAFamilyLink) and its authentication add-on, and make sure it provides a daily screen-time sensor for the child.
+2. Map the kid to that sensor in the tk-budget options:
+
+   ```yaml
+   familylink:
+     - kid: <kid-user>
+       entity: sensor.<child>_daily_screen_time
+   ```
+
+3. Such kids get the entities "Phone time today", "Daily combined limit", "Combined limit active", "Remaining combined" and "Combined left". Phone minutes count only against the combined daily limit, not against the weekly or the PC-only daily limit. A midnight guard at 00:15 keeps yesterday's phone value from being counted for the new day.
 
 ## 3. tk-agent on each PC
 
@@ -55,28 +81,72 @@ journalctl -u tk-agent -f
 
 Entity ids for kid `kid-a` (`-` becomes `_`). tk-budget ≥ 0.3.1 sets them via `default_entity_id`; HA applies that only when it first creates an entity. Devices created by 0.3.0 got ids like `sensor.screen_time_kid_a_remaining_total`: delete the device in HA and restart tk-budget to get the ids below (budget and settings are kept in tk-budget).
 
+The card below is one whole card element. The three tiles show the percent left per limit with a bar (tile feature `bar-gauge`) and the remaining minutes as secondary text; the combined rows exist only for kids with a Family Link mapping, remove them otherwise.
+
 ```yaml
-type: entities
-title: Screen time kid-a
-entities:
-  - entity: switch.tk_kid_a_limit_active
-    name: Limit active
-  - entity: sensor.tk_kid_a_remaining_total
-    name: Remaining this week
-  - entity: sensor.tk_kid_a_total_today
-    name: Used today
-  - entity: number.tk_kid_a_weekly_total_budget
-    name: Weekly budget
-  - type: buttons
+type: vertical-stack
+cards:
+  - type: tile
+    entity: sensor.tk_kid_a_week_left_pct
+    name: Week left
+    state_content:
+      - state
+      - remaining_min
+    features:
+      - type: bar-gauge
+        min: 0
+        max: 100
+  - type: tile
+    entity: sensor.tk_kid_a_today_left_pct
+    name: Today left
+    state_content:
+      - state
+      - remaining_min
+    features:
+      - type: bar-gauge
+        min: 0
+        max: 100
+  - type: tile
+    entity: sensor.tk_kid_a_combined_left_pct
+    name: PC + phone left
+    state_content:
+      - state
+      - remaining_min
+    features:
+      - type: bar-gauge
+        min: 0
+        max: 100
+  - type: entities
+    title: Screen time kid-a
     entities:
-      - entity: button.tk_kid_a_adjust_plus_15
-        name: +15 min
-        icon: mdi:plus-circle
-      - entity: button.tk_kid_a_adjust_minus_15
-        name: −15 min
-        icon: mdi:minus-circle
-  - entity: select.tk_kid_a_time_up_action
-    name: When time is up
+      - entity: sensor.tk_kid_a_remaining_total
+        name: Remaining (effective)
+      - entity: sensor.tk_kid_a_total_today
+        name: Used today
+      - entity: sensor.tk_kid_a_phone_today
+        name: Phone today
+      - entity: switch.tk_kid_a_limit_active
+        name: Weekly limit active
+      - entity: number.tk_kid_a_weekly_total_budget
+        name: Weekly limit
+      - entity: switch.tk_kid_a_daily_limit_active
+        name: Daily limit active
+      - entity: number.tk_kid_a_daily_total_limit
+        name: Daily limit
+      - entity: switch.tk_kid_a_combined_limit_active
+        name: Combined limit active
+      - entity: number.tk_kid_a_daily_combined_limit
+        name: Combined limit
+      - type: buttons
+        entities:
+          - entity: button.tk_kid_a_adjust_plus_15
+            name: +15 min
+            icon: mdi:plus-circle
+          - entity: button.tk_kid_a_adjust_minus_15
+            name: −15 min
+            icon: mdi:minus-circle
+      - entity: select.tk_kid_a_time_up_action
+        name: When time is up
 ```
 
 ## Development
