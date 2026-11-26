@@ -472,9 +472,48 @@ def test_offline_host_counts_zero_until_it_reports_again(env):
     assert (st["sessions"], st["sessions_locked"]) == (1, 0)
     assert st["sessions_by_host"] == {"pc1": 1}
     bus.publish("timekpr/pc2/status", "online", retain=True)
-    assert state(bus)["sessions"] == 1
+    assert state(bus)["sessions"] == 3  # its stored report counts again
+    report_sessions(bus, "pc2", 1, 1)
+    assert state(bus)["sessions"] == 2
+
+
+def test_stale_sessions_after_offline_status_count_zero(env):
+    """Retained replay order is random: the offline status may arrive before the stale sessions."""
+    bus, *_ = env
+    report(bus, "pc1", 60)
+    report_sessions(bus, "pc1", 1, 0)
+    bus.publish("timekpr/pc2/status", "offline", retain=True)
     report_sessions(bus, "pc2", 2, 1)
-    assert state(bus)["sessions"] == 3
+    st = state(bus)
+    assert (st["sessions"], st["sessions_locked"]) == (1, 0)
+    assert st["sessions_by_host"] == {"pc1": 1}
+    bus.publish("timekpr/pc2/status", "online", retain=True)
+    st = state(bus)
+    assert (st["sessions"], st["sessions_locked"]) == (3, 1)
+    assert st["sessions_by_host"] == {"pc1": 1, "pc2": 2}
+
+
+def test_reconnect_republishes_budget_online(env):
+    bus, *_ = env
+    bus.publish(discovery.STATUS_TOPIC, "offline", retain=True)  # the broker fired the last will
+    bus.drop()
+    bus.reconnect()
+    assert bus.retained[discovery.STATUS_TOPIC] == "online"
+
+
+@pytest.mark.parametrize("cmd", [Cmd(op="logout"), Cmd(op="end_inactive"), Cmd(op="adjust_total", minutes=15)])
+def test_retained_cmd_from_before_start_ignored(tmp_path, cmd):
+    bus = InMemoryBus()
+    store = Store(str(tmp_path / "db.sqlite"))
+    store.add_kid(KID)
+    store.set_setting(KID, "weekly_total_min", "600")
+    store.set_setting(KID, "limit_active", "ON")
+    bus.publish(topics.cmd(KID), cmd.to_json(), retain=True)  # e.g. a retained publish by hand
+    BudgetService(bus, store, FixedClock(MONDAY)).start()
+    bus.drop()
+    bus.reconnect()
+    assert not [t for t, *_ in bus.published if t == topics.action(KID)]
+    assert remaining(bus).total_s == 36000
 
 
 def test_sessions_for_unknown_kid_ignored(env):

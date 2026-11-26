@@ -44,6 +44,7 @@ class BudgetService:
         self._ledger = UsageLedger()
         self._play_ledger = UsageLedger()
         self._sessions: dict[tuple[str, str], Sessions] = {}  # (host, kid) -> latest report
+        self._offline: set[str] = set()  # hosts whose last status is "offline": their reports count 0
         self._last: dict[str, tuple[str, str]] = {}  # kid -> (remaining json, state json)
         self._lock = threading.RLock()
 
@@ -59,8 +60,14 @@ class BudgetService:
         self._bus.subscribe(f"{topics.PREFIX}/+/+/usage", self._on_usage)
         self._bus.subscribe(f"{topics.PREFIX}/+/+/sessions", self._on_sessions)
         self._bus.subscribe(f"{topics.PREFIX}/+/status", self._on_status)
-        self._bus.subscribe(topics.cmd("+"), self._on_cmd)
+        self._bus.subscribe(topics.cmd("+"), self._on_cmd, retained=False)  # a button press, never a replay
         self._bus.subscribe(discovery.set_topic("+", "+"), self._on_set)
+        self._bus.on_connect(self._on_reconnect)
+
+    @_locked
+    def _on_reconnect(self) -> None:
+        # the broker may have fired our last will meanwhile, making every HA entity unavailable
+        self._bus.publish(discovery.STATUS_TOPIC, "online", retain=True)
 
     def _announce(self, kid: str) -> None:
         if kid not in self._kids:
@@ -151,13 +158,16 @@ class BudgetService:
 
     @_locked
     def _on_status(self, topic: str, payload: str) -> None:
+        # Retained replay order is random, so a stale sessions report may arrive after "offline":
+        # reports are kept, but an offline host's count as 0 until it is online again.
         host = topics.parse_status_topic(topic)
-        if host is None or payload != "offline":
-            return  # "online" does not restore counts; the next sessions report does
-        gone = [key for key in self._sessions if key[0] == host]
-        for key in gone:
-            del self._sessions[key]
-        for kid in {k for _, k in gone}:
+        if host is None or payload not in ("online", "offline"):
+            return
+        if payload == "offline":
+            self._offline.add(host)
+        else:
+            self._offline.discard(host)
+        for kid in {k for h, k in self._sessions if h == host}:
             self._publish(kid, force=False)
 
     @_locked
@@ -292,10 +302,11 @@ class BudgetService:
         play_s = play_rem if play_limited else 0
         rem_json = Remaining(week=week, total_s=eff if limited else 0, limited=limited,
                          play_s=play_s, play_limited=play_limited).to_json()
-        by_host = {h: v.count for (h, k), v in sorted(self._sessions.items()) if k == kid and v.count > 0}
+        live = {h: v for (h, k), v in sorted(self._sessions.items()) if k == kid and h not in self._offline}
+        by_host = {h: v.count for h, v in live.items() if v.count > 0}
         state_json = json.dumps({
             "sessions": sum(by_host.values()),
-            "sessions_locked": sum(v.locked for (_, k), v in self._sessions.items() if k == kid),
+            "sessions_locked": sum(v.locked for v in live.values()),
             "sessions_by_host": by_host,
             "week": week,
             "day": day,
