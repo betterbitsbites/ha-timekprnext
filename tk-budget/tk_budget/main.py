@@ -12,20 +12,19 @@ import logging
 import os
 import time
 import urllib.request
-from typing import Callable, Mapping
+from typing import Mapping
 
 from tk_protocol.bus import PahoBus
 from tk_protocol.clock import SystemClock
 
 from . import discovery
+from .familylink import Fetch, read_minutes
 from .service import BudgetService
 from .store import Store
 
 OPTIONS_PATH = os.environ.get("TK_BUDGET_OPTIONS", "/data/options.json")
 SUPERVISOR_MQTT_URL = "http://supervisor/services/mqtt"
 TICK_S = 30
-
-Fetch = Callable[[str, dict], str]
 
 log = logging.getLogger("tk_budget")
 
@@ -44,7 +43,21 @@ def load_options(path: str) -> dict:
         "broker_user": _blank_to_none(opts.get("broker_user")),
         "broker_password": _blank_to_none(opts.get("broker_password")),
         "db_path": opts.get("db_path") or "/data/tk-budget.db",
+        "familylink": _load_familylink(opts.get("familylink")),
     }
+
+
+def _load_familylink(raw: object) -> dict[str, str]:
+    """kid -> HA sensor entity; invalid entries are skipped with a warning."""
+    out: dict[str, str] = {}
+    for item in raw if isinstance(raw, list) else []:
+        kid = str(item.get("kid") or "").strip() if isinstance(item, dict) else ""
+        entity = _blank_to_none(item.get("entity")) if isinstance(item, dict) else None
+        if not discovery.valid_kid(kid) or not entity:
+            log.warning("ignoring familylink entry %r", item)
+            continue
+        out[kid] = entity
+    return out
 
 
 def _urllib_fetch(url: str, headers: dict) -> str:
@@ -83,11 +96,20 @@ def main() -> None:
     store = Store(opts["db_path"])
     bus = PahoBus(broker["host"], broker["port"], broker["username"], broker["password"],
                   client_id="tk-budget", will_topic=discovery.STATUS_TOPIC, will_payload="offline")
-    service = BudgetService(bus, store, SystemClock())
+    phone = opts["familylink"]
+    service = BudgetService(bus, store, SystemClock(), phone_kids=phone.keys())
     service.start()
     log.info("tk-budget running; known kids: %s", ", ".join(store.kids()) or "none yet")
+    log.info("Family Link kids: %s", ", ".join(phone) or "none")
     while True:
         time.sleep(TICK_S)
+        for kid, entity in phone.items():
+            try:
+                minutes = read_minutes(entity, os.environ, _urllib_fetch)
+                if minutes is not None:
+                    service.set_phone_minutes(kid, minutes)
+            except Exception:
+                log.exception("family link update for %s failed", kid)
         try:
             service.tick()
         except Exception:

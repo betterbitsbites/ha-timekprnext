@@ -14,6 +14,7 @@ MAX_WEEKLY_MIN = 7 * 24 * 60
 STATUS_TOPIC = f"{topics.PREFIX}/_budget/status"
 LIMIT_KEY = "limit_active"  # "ON"/"OFF"; off (default) = no limit
 DAILY_KEY = "daily_limit_active"  # "ON"/"OFF"; off (default) = no daily limit
+COMBINED_KEY = "combined_limit_active"  # "ON"/"OFF"; PC + phone daily limit (Family Link kids only)
 MAX_DAILY_MIN = 24 * 60
 _KID_RE = re.compile(r"^[a-z0-9-][a-z0-9_-]*$")  # leading "_" is reserved (`_budget`)
 
@@ -46,6 +47,55 @@ def _base(kid: str, component: str, obj: str, name: str) -> dict:
 
 def _topic(component: str, kid: str, obj: str) -> str:
     return f"homeassistant/{component}/tk_{kid}/{obj}/config"
+
+
+COMBINED_OBJECTS = (("number", "daily_combined_limit"), ("switch", COMBINED_KEY),
+                    ("sensor", "remaining_combined"), ("sensor", "combined_left_pct"),
+                    ("sensor", "phone_today"))
+
+
+def combined_topics(kid: str) -> list[str]:
+    return [_topic(c, kid, o) for c, o in COMBINED_OBJECTS]
+
+
+def combined_entities(kid: str) -> list[tuple[str, dict]]:
+    """Entities for the combined PC + phone daily limit; only for kids with a Family Link sensor."""
+    st = state_topic(kid)
+    out: list[tuple[str, dict]] = []
+
+    p = _base(kid, "number", "daily_combined_limit", "Daily combined limit")
+    p.update(state_topic=st, command_topic=set_topic(kid, "combined_total_min"),
+             value_template="{{ value_json.combined_total_min }}", min=0, max=MAX_DAILY_MIN,
+             step=5, mode="box", unit_of_measurement="min", icon="mdi:cellphone-clock")
+    out.append((_topic("number", kid, "daily_combined_limit"), p))
+
+    p = _base(kid, "switch", COMBINED_KEY, "Combined limit active")
+    p.update(state_topic=st, command_topic=set_topic(kid, COMBINED_KEY), payload_on="ON", payload_off="OFF",
+             value_template="{{ 'ON' if value_json.combined_limited else 'OFF' }}", icon="mdi:timer-lock-outline")
+    out.append((_topic("switch", kid, COMBINED_KEY), p))
+
+    p = _base(kid, "sensor", "remaining_combined", "Remaining combined")
+    p.update(state_topic=st, unit_of_measurement="min", icon="mdi:timer-sand",
+             value_template="{{ ((value_json.limits.combined.remaining_s / 60) | round(0) | int)"
+                            " if value_json.limits.combined.on else None }}")
+    out.append((_topic("sensor", kid, "remaining_combined"), p))
+
+    p = _base(kid, "sensor", "combined_left_pct", "Combined left")
+    p.update(state_topic=st, unit_of_measurement="%", icon="mdi:percent",
+             value_template="{{ value_json.limits.combined.pct if value_json.limits.combined.on else None }}",
+             json_attributes_topic=st,
+             json_attributes_template=(
+                 "{% set l = value_json.limits.combined %}"
+                 "{{ {'remaining_min': (l.remaining_s / 60) | round(0) | int,"
+                 " 'limit_min': (l.allowance_s / 60) | round(0) | int} | tojson }}"))
+    out.append((_topic("sensor", kid, "combined_left_pct"), p))
+
+    p = _base(kid, "sensor", "phone_today", "Phone time today")
+    p.update(state_topic=st, unit_of_measurement="min", icon="mdi:cellphone",
+             value_template="{{ (value_json.phone_today_s / 60) | round(0) | int }}")
+    out.append((_topic("sensor", kid, "phone_today"), p))
+
+    return out
 
 
 def entities(kid: str) -> list[tuple[str, dict]]:

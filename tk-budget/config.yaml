@@ -1,5 +1,5 @@
 name: tk-budget
-version: "0.3.1"
+version: "0.4.0"
 slug: tk_budget
 description: Shared weekly screen-time budget for Timekpr-nExT clients
 url: https://github.com/<owner>/ha-timekprnext
@@ -14,10 +14,17 @@ boot: auto
 services:
   - mqtt:need
 # Kids are not configured: every timekpr user reported by a PC appears automatically.
+# Core API proxy, to read the Google Family Link sensors.
+homeassistant_api: true
 options:
   db_path: /data/tk-budget.db
+  familylink: []
 schema:
   db_path: str
+  # Kids with a Google Family Link sensor (phone time), e.g. kid: kid-a, entity: sensor.<child>_daily_screen_time
+  familylink:
+    - kid: str
+      entity: str
   # Only to use a broker other than the Mosquitto add-on:
   broker_host: str?
   broker_port: port?

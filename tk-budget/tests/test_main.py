@@ -70,3 +70,15 @@ def test_options_without_kids_and_leftover_kids_ignored(tmp_path):
     assert "kids" not in load_options(str(p))
     p.write_text(json.dumps({"db_path": "/data/x.db", "kids": ["kid-a"]}))
     assert "kids" not in load_options(str(p))
+
+
+def test_familylink_option_mapped_and_filtered(tmp_path):
+    p = tmp_path / "options.json"
+    p.write_text(json.dumps({"familylink": [
+        {"kid": "kid-a", "entity": " sensor.x "},
+        {"kid": "Bad Kid", "entity": "sensor.y"},
+        {"kid": "kid-b", "entity": "  "},
+    ]}))
+    assert load_options(str(p))["familylink"] == {"kid-a": "sensor.x"}
+    p.write_text(json.dumps({}))
+    assert load_options(str(p))["familylink"] == {}

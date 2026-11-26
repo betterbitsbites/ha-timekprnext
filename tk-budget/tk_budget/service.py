@@ -10,6 +10,8 @@ import functools
 import json
 import logging
 import threading
+from collections.abc import Collection
+from datetime import timedelta
 
 from tk_protocol import topics
 from tk_protocol.bus import Bus
@@ -33,7 +35,8 @@ def _locked(fn):
 
 
 class BudgetService:
-    def __init__(self, bus: Bus, store: Store, clock: Clock) -> None:
+    def __init__(self, bus: Bus, store: Store, clock: Clock, phone_kids: Collection[str] = ()) -> None:
+        self._phone_kids = frozenset(phone_kids)
         self._bus = bus
         self._store = store
         self._clock = clock
@@ -58,6 +61,12 @@ class BudgetService:
             self._kids.append(kid)
         for topic, payload in discovery.entities(kid):
             self._bus.publish(topic, json.dumps(payload, sort_keys=True), retain=True)
+        if kid in self._phone_kids:
+            for topic, payload in discovery.combined_entities(kid):
+                self._bus.publish(topic, json.dumps(payload, sort_keys=True), retain=True)
+        else:  # remove entities left over from when the kid had a Family Link sensor
+            for topic in discovery.combined_topics(kid):
+                self._bus.publish(topic, "", retain=True)
         self._publish_settings(kid)
         self.republish(kid)
 
@@ -70,6 +79,23 @@ class BudgetService:
     @_locked
     def republish(self, kid: str) -> None:
         self._publish(kid, force=True)
+
+    @_locked
+    def set_phone_minutes(self, kid: str, minutes: float) -> None:
+        """Record today's phone screen time (Family Link, minutes over all devices)."""
+        if kid not in self._phone_kids or kid not in self._kids:
+            return
+        now = self._clock.now()
+        day = now.date().isoformat()
+        yesterday = (now.date() - timedelta(days=1)).isoformat()
+        s = int(round(minutes * 60))
+        if "_familylink" not in self._store.daily_totals(kid, day):
+            # The sensor resets at its first refresh after midnight; until then it still shows yesterday.
+            prev = self._store.daily_totals(kid, yesterday).get("_familylink")
+            if prev is not None and s >= prev and (now.hour, now.minute) < (0, 15):
+                return
+        self._store.record_daily(kid, day, "_familylink", s)
+        self._publish(kid, force=False)
 
     # --- handlers -------------------------------------------------------------
 
@@ -142,7 +168,16 @@ class BudgetService:
                 return
             minutes = max(0, min(discovery.MAX_DAILY_MIN, minutes))
             self._store.set_setting(kid, key, str(minutes))
-        elif key in (discovery.LIMIT_KEY, discovery.DAILY_KEY):
+        elif key == "combined_total_min" and kid in self._phone_kids:
+            try:
+                minutes = int(float(payload))
+            except ValueError:
+                log.warning("ignoring combined_total_min %r", payload)
+                return
+            minutes = max(0, min(discovery.MAX_DAILY_MIN, minutes))
+            self._store.set_setting(kid, key, str(minutes))
+        elif key in (discovery.LIMIT_KEY, discovery.DAILY_KEY) or (
+                key == discovery.COMBINED_KEY and kid in self._phone_kids):
             if payload not in ("ON", "OFF"):
                 log.warning("ignoring %s %r", key, payload)
                 return
@@ -180,10 +215,16 @@ class BudgetService:
         day_adj = self._store.get_day_adjustment_s(kid, day)
         week_on = self._limited(kid)
         day_on = self._store.get_setting(kid, discovery.DAILY_KEY) == "ON"
-        today_s = sum(v for h, v in self._store.daily_totals(kid, day).items() if h != "_familylink")
+        totals = self._store.daily_totals(kid, day)
+        today_s = sum(v for h, v in totals.items() if h != "_familylink")
+        phone_s = totals.get("_familylink", 0) if kid in self._phone_kids else 0
+        combined_min = int(self._store.get_setting(kid, "combined_total_min", "0") or 0)
+        combined_on = (kid in self._phone_kids
+                       and self._store.get_setting(kid, discovery.COMBINED_KEY) == "ON")
         week_lim = limit("week", week_on, budget, week_adj, self._ledger.used_s(kid, week))
         day_lim = limit("day", day_on, daily_min, day_adj, today_s)
-        limited, eff = effective([week_lim, day_lim])
+        comb_lim = limit("combined", combined_on, combined_min, day_adj, today_s + phone_s)
+        limited, eff = effective([week_lim, day_lim, comb_lim])
         rem = eff if limited else week_lim.remaining_s
         rem_json = Remaining(week=week, total_s=eff if limited else 0, limited=limited).to_json()
         state_json = json.dumps({
@@ -196,10 +237,13 @@ class BudgetService:
             "daily_limited": day_on,
             "adjustment_min": week_adj // 60,
             "remaining_s": rem,
+            "combined_limited": combined_on,
+            "combined_total_min": combined_min,
             "today_s": today_s,
+            "phone_today_s": phone_s,
             "limits": {lim.key: {"on": lim.active, "allowance_s": lim.allowance_s,
                                  "remaining_s": lim.remaining_s, "pct": lim.pct}
-                       for lim in (week_lim, day_lim)},
+                       for lim in (week_lim, day_lim, comb_lim)},
             "time_up_action": self._time_up_action(kid),
         }, sort_keys=True)
         if not force and self._last.get(kid) == (rem_json, state_json):

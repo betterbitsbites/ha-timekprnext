@@ -348,3 +348,86 @@ def test_daily_settings_validation(env):
     assert store.get_setting(KID, "daily_total_min") == "0"
     bus.publish(discovery.set_topic(KID, "daily_limit_active"), "maybe")
     assert store.get_setting(KID, "daily_limit_active") is None
+
+
+# --- combined PC + phone limit ---------------------------------------------------
+
+@pytest.fixture
+def penv(tmp_path):
+    bus = InMemoryBus()
+    store = Store(str(tmp_path / "db.sqlite"))
+    store.add_kid(KID)
+    store.add_kid("kid-b")
+    store.set_setting(KID, "weekly_total_min", "600")
+    store.set_setting(KID, "limit_active", "ON")
+    clock = FixedClock(MONDAY)
+    svc = BudgetService(bus, store, clock, phone_kids=[KID])
+    svc.start()
+    return bus, store, clock, svc
+
+
+def set_combined(bus, minutes, on="ON"):
+    bus.publish(discovery.set_topic(KID, "combined_total_min"), str(minutes))
+    bus.publish(discovery.set_topic(KID, "combined_limit_active"), on)
+
+
+def test_combined_limit_counts_phone_and_pc(penv):
+    bus, store, clock, svc = penv
+    set_combined(bus, 60)
+    report(bus, "pc1", 1200, day_s=1200)
+    svc.set_phone_minutes(KID, 20)
+    st = state(bus)
+    assert st["limits"]["combined"]["remaining_s"] == 3600 - 2400
+    assert st["combined_limited"] is True and st["combined_total_min"] == 60
+    assert st["phone_today_s"] == 1200
+    assert st["today_s"] == 1200
+    assert st["limits"]["week"]["remaining_s"] == 36000 - 1200
+    assert st["limits"]["day"]["on"] is False
+    assert remaining(bus).total_s == 3600 - 2400
+
+
+def test_phone_ignored_when_combined_off(penv):
+    bus, store, clock, svc = penv
+    report(bus, "pc1", 1200, day_s=1200)
+    svc.set_phone_minutes(KID, 20)
+    assert remaining(bus).total_s == 36000 - 1200
+    assert state(bus)["combined_limited"] is False
+
+
+def test_phone_value_never_lowers(penv):
+    bus, store, clock, svc = penv
+    svc.set_phone_minutes(KID, 40)
+    svc.set_phone_minutes(KID, 30)
+    assert state(bus)["phone_today_s"] == 2400
+
+
+def test_midnight_guard(penv):
+    bus, store, clock, svc = penv
+    store.record_daily(KID, "2026-11-15", "_familylink", 90 * 60)
+    clock.set(datetime(2026, 11, 16, 0, 5))
+    svc.set_phone_minutes(KID, 90)
+    assert "_familylink" not in store.daily_totals(KID, "2026-11-16")
+    svc.set_phone_minutes(KID, 3)
+    assert store.daily_totals(KID, "2026-11-16")["_familylink"] == 180
+    clock.set(datetime(2026, 11, 17, 0, 20))
+    store.record_daily(KID, "2026-11-16", "_familylink", 90 * 60)
+    svc.set_phone_minutes(KID, 95)
+    assert store.daily_totals(KID, "2026-11-17")["_familylink"] == 95 * 60
+
+
+def test_phone_ignored_for_other_or_unknown_kids(penv):
+    bus, store, clock, svc = penv
+    svc.set_phone_minutes("kid-b", 10)
+    svc.set_phone_minutes("nobody", 10)
+    assert store.daily_totals("kid-b", "2026-11-16") == {}
+    assert store.daily_totals("nobody", "2026-11-16") == {}
+
+
+def test_combined_entities_only_for_phone_kids(penv):
+    bus, *_ = penv
+    for obj in ("daily_combined_limit", "combined_limit_active", "remaining_combined",
+                "combined_left_pct", "phone_today"):
+        comp = {"daily_combined_limit": "number", "combined_limit_active": "switch"}.get(obj, "sensor")
+        assert (f"homeassistant/{comp}/tk_kid-b/{obj}/config", "", True) in bus.published
+        assert f"homeassistant/{comp}/tk_kid-b/{obj}/config" not in bus.retained
+        assert bus.retained[f"homeassistant/{comp}/tk_kid-a/{obj}/config"] != ""
