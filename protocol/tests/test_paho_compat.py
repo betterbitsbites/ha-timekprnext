@@ -24,6 +24,18 @@ class _Client:
     def subscribe(self, pattern, qos=0): self.subscribed.append(pattern)
 
 
+class _Msg:
+    def __init__(self, topic, payload, retain):
+        self.topic, self.payload, self.retain = topic, payload.encode(), retain
+
+
+def _connect(client, v2, ok=True):
+    if v2:
+        client.on_connect(client, None, {}, _Reason(not ok), None)
+    else:
+        client.on_connect(client, None, {}, 0 if ok else 5)
+
+
 class _Reason:
     def __init__(self, failure): self.is_failure = failure
 
@@ -69,3 +81,38 @@ def test_pahobus_failed_connect_does_not_subscribe(monkeypatch, v2):
     else:
         client.on_connect(client, None, {}, 5)  # 5 = not authorised
     assert client.subscribed == []
+
+
+@pytest.mark.parametrize("v2", [False, True])
+def test_pahobus_on_connect_hooks_after_resubscribe_on_every_successful_connect(monkeypatch, v2):
+    _install(monkeypatch, v2)
+    bus = PahoBus("h", 1883, None, None, client_id="c")
+    client = _Client.instances[0]
+    bus.subscribe("a/#", lambda t, p: None)
+    seen = []
+
+    def bad():
+        raise RuntimeError("boom")
+
+    bus.on_connect(bad)  # must not raise into paho
+    bus.on_connect(lambda: seen.append(list(client.subscribed)))
+    client.subscribed.clear()
+    _connect(client, v2, ok=False)
+    assert seen == []
+    _connect(client, v2)
+    _connect(client, v2)
+    assert seen == [["a/#"], ["a/#", "a/#"]]
+
+
+@pytest.mark.parametrize("v2", [False, True])
+def test_pahobus_non_retained_subscription_skips_retained_messages(monkeypatch, v2):
+    _install(monkeypatch, v2)
+    bus = PahoBus("h", 1883, None, None, client_id="c")
+    client = _Client.instances[0]
+    all_, live = [], []
+    bus.subscribe("a/#", lambda t, p: all_.append(p))
+    bus.subscribe("a/#", lambda t, p: live.append(p), retained=False)
+    client.on_message(client, None, _Msg("a/x", "old", True))
+    client.on_message(client, None, _Msg("a/x", "new", False))
+    assert all_ == ["old", "new"]
+    assert live == ["new"]

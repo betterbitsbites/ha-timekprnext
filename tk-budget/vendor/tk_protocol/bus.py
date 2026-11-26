@@ -7,6 +7,7 @@ import threading
 from typing import Callable, Protocol
 
 Handler = Callable[[str, str], None]
+Hook = Callable[[], None]
 
 log = logging.getLogger(__name__)
 
@@ -14,7 +15,21 @@ log = logging.getLogger(__name__)
 class Bus(Protocol):
     def publish(self, topic: str, payload: str, retain: bool = False) -> None: ...
 
-    def subscribe(self, pattern: str, handler: Handler) -> None: ...
+    def subscribe(self, pattern: str, handler: Handler, retained: bool = True) -> None:
+        """retained=False: the handler never sees retained deliveries (replays), only live messages."""
+        ...
+
+    def on_connect(self, fn: Hook) -> None:
+        """Register `fn` to run after every successful (re)connect, once subscriptions are renewed."""
+        ...
+
+
+def _run_hooks(hooks: list[Hook]) -> None:
+    for fn in hooks:
+        try:
+            fn()
+        except Exception:  # a hook must never break the connection handling
+            log.exception("on_connect hook failed")
 
 
 def topic_matches(pattern: str, topic: str) -> bool:
@@ -35,12 +50,14 @@ class InMemoryBus:
     """Synchronous broker stand-in.
 
     `drop()` simulates a broker outage for this client: publishes are lost and
-    nothing is delivered. `reconnect()` resubscribes, which replays retained messages.
+    nothing is delivered. `reconnect()` resubscribes, which replays retained messages
+    (except to subscriptions made with retained=False), then runs the on_connect hooks.
     `published` records every (topic, payload, retain) that reached the broker.
     """
 
     def __init__(self) -> None:
-        self._subs: list[tuple[str, Handler]] = []
+        self._subs: list[tuple[str, Handler, bool]] = []
+        self._hooks: list[Hook] = []
         self.retained: dict[str, str] = {}
         self.published: list[tuple[str, str, bool]] = []
         self.connected = True
@@ -54,22 +71,27 @@ class InMemoryBus:
                 self.retained.pop(topic, None)
             else:
                 self.retained[topic] = payload
-        for pattern, handler in list(self._subs):
+        for pattern, handler, _ in list(self._subs):
             if topic_matches(pattern, topic):
                 handler(topic, payload)
 
-    def subscribe(self, pattern: str, handler: Handler) -> None:
-        self._subs.append((pattern, handler))
-        if self.connected:
+    def subscribe(self, pattern: str, handler: Handler, retained: bool = True) -> None:
+        self._subs.append((pattern, handler, retained))
+        if self.connected and retained:
             self._replay(pattern, handler)
+
+    def on_connect(self, fn: Hook) -> None:
+        self._hooks.append(fn)
 
     def drop(self) -> None:
         self.connected = False
 
     def reconnect(self) -> None:
         self.connected = True
-        for pattern, handler in list(self._subs):
-            self._replay(pattern, handler)
+        for pattern, handler, retained in list(self._subs):
+            if retained:
+                self._replay(pattern, handler)
+        _run_hooks(list(self._hooks))
 
     def _replay(self, pattern: str, handler: Handler) -> None:
         for topic, payload in list(self.retained.items()):
@@ -86,7 +108,8 @@ class PahoBus:
                  client_id: str, will_topic: str | None = None, will_payload: str | None = None) -> None:
         import paho.mqtt.client as mqtt
 
-        self._subs: list[tuple[str, Handler]] = []
+        self._subs: list[tuple[str, Handler, bool]] = []
+        self._hooks: list[Hook] = []
         self._lock = threading.Lock()
         if hasattr(mqtt, "CallbackAPIVersion"):  # paho >= 2.0
             self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
@@ -106,10 +129,14 @@ class PahoBus:
     def publish(self, topic: str, payload: str, retain: bool = False) -> None:
         self._client.publish(topic, payload, qos=1, retain=retain)
 
-    def subscribe(self, pattern: str, handler: Handler) -> None:
+    def subscribe(self, pattern: str, handler: Handler, retained: bool = True) -> None:
         with self._lock:
-            self._subs.append((pattern, handler))
+            self._subs.append((pattern, handler, retained))
         self._client.subscribe(pattern, qos=1)
+
+    def on_connect(self, fn: Hook) -> None:
+        with self._lock:
+            self._hooks.append(fn)
 
     def stop(self) -> None:
         self._client.loop_stop()
@@ -127,15 +154,20 @@ class PahoBus:
             return
         log.info("MQTT connected")
         with self._lock:
-            patterns = {p for p, _ in self._subs}
+            patterns = list(dict.fromkeys(p for p, _, _ in self._subs))
+            hooks = list(self._hooks)
         for p in patterns:
             client.subscribe(p, qos=1)
+        _run_hooks(hooks)
 
     def _on_message(self, client, userdata, msg) -> None:  # noqa: ANN001
         payload = msg.payload.decode("utf-8", errors="replace")
         with self._lock:
             subs = list(self._subs)
-        for pattern, handler in subs:
+        replayed = bool(getattr(msg, "retain", False))  # True only for retained deliveries on subscribe
+        for pattern, handler, retained in subs:
+            if replayed and not retained:
+                continue
             if topic_matches(pattern, msg.topic):
                 try:
                     handler(msg.topic, payload)
