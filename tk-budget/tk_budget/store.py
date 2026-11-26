@@ -26,6 +26,18 @@ CREATE TABLE IF NOT EXISTS usage (
 CREATE TABLE IF NOT EXISTS daily (
     kid TEXT NOT NULL, day TEXT NOT NULL, host TEXT NOT NULL, total_s INTEGER NOT NULL,
     PRIMARY KEY (kid, day, host));
+CREATE TABLE IF NOT EXISTS play_usage (
+    kid TEXT NOT NULL, host TEXT NOT NULL, week TEXT NOT NULL, play_s INTEGER NOT NULL,
+    PRIMARY KEY (kid, host, week));
+CREATE TABLE IF NOT EXISTS play_daily (
+    kid TEXT NOT NULL, day TEXT NOT NULL, host TEXT NOT NULL, play_s INTEGER NOT NULL,
+    PRIMARY KEY (kid, day, host));
+CREATE TABLE IF NOT EXISTS play_adjustments (
+    kid TEXT NOT NULL, week TEXT NOT NULL, adjustment_s INTEGER NOT NULL,
+    PRIMARY KEY (kid, week));
+CREATE TABLE IF NOT EXISTS play_day_adjustments (
+    kid TEXT NOT NULL, day TEXT NOT NULL, adjustment_s INTEGER NOT NULL,
+    PRIMARY KEY (kid, day));
 """
 
 
@@ -98,6 +110,49 @@ class Store:
         """All stored (kid, host, week, total_s) rows."""
         with self._lock:
             rows = self._db.execute("SELECT kid, host, week, total_s FROM usage ORDER BY kid, host, week").fetchall()
+        return [tuple(r) for r in rows]  # type: ignore[misc]
+
+    def get_play_adjustment_s(self, kid: str, week: str) -> int:
+        row = self._one("SELECT adjustment_s FROM play_adjustments WHERE kid=? AND week=?", (kid, week))
+        return row[0] if row else 0
+
+    def add_play_adjustment_s(self, kid: str, week: str, delta_s: int) -> int:
+        self._exec("INSERT INTO play_adjustments (kid, week, adjustment_s) VALUES (?, ?, ?) "
+                   "ON CONFLICT (kid, week) DO UPDATE SET adjustment_s=adjustment_s+excluded.adjustment_s",
+                   (kid, week, delta_s))
+        return self.get_play_adjustment_s(kid, week)
+
+    def get_play_day_adjustment_s(self, kid: str, day: str) -> int:
+        row = self._one("SELECT adjustment_s FROM play_day_adjustments WHERE kid=? AND day=?", (kid, day))
+        return row[0] if row else 0
+
+    def add_play_day_adjustment_s(self, kid: str, day: str, delta_s: int) -> int:
+        self._exec("INSERT INTO play_day_adjustments (kid, day, adjustment_s) VALUES (?, ?, ?) "
+                   "ON CONFLICT (kid, day) DO UPDATE SET adjustment_s=adjustment_s+excluded.adjustment_s",
+                   (kid, day, delta_s))
+        return self.get_play_day_adjustment_s(kid, day)
+
+    def record_play_daily(self, kid: str, day: str, host: str, play_s: int) -> None:
+        self._exec("INSERT INTO play_daily (kid, day, host, play_s) VALUES (?, ?, ?, ?) "
+                   "ON CONFLICT (kid, day, host) DO UPDATE SET play_s=MAX(play_s, excluded.play_s)",
+                   (kid, day, host, play_s))
+
+    def play_daily_totals(self, kid: str, day: str) -> dict[str, int]:
+        with self._lock:
+            rows = self._db.execute("SELECT host, play_s FROM play_daily WHERE kid=? AND day=?",
+                                    (kid, day)).fetchall()
+        return dict(rows)
+
+    def save_play_usage(self, kid: str, host: str, week: str, play_s: int) -> None:
+        self._exec("INSERT INTO play_usage (kid, host, week, play_s) VALUES (?, ?, ?, ?) "
+                   "ON CONFLICT (kid, host, week) DO UPDATE SET play_s=MAX(play_s, excluded.play_s)",
+                   (kid, host, week, play_s))
+
+    def load_play_usage(self) -> list[tuple[str, str, str, int]]:
+        """All stored (kid, host, week, play_s) rows."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT kid, host, week, play_s FROM play_usage ORDER BY kid, host, week").fetchall()
         return [tuple(r) for r in rows]  # type: ignore[misc]
 
     def _exec(self, sql: str, args: tuple) -> None:

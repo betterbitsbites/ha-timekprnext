@@ -67,3 +67,35 @@ def test_day_adjustments_accumulate_per_day(tmp_path):
     assert s.add_day_adjustment_s("k", "2026-11-16", 900) == 1800
     assert s.get_day_adjustment_s("k", "2026-11-16") == 1800
     assert s.get_day_adjustment_s("k", "2026-11-17") == 0
+
+
+def test_play_usage_keeps_max_and_loads(tmp_path):
+    s = Store(str(tmp_path / "db.sqlite"))
+    s.save_play_usage("kid-a", "pc1", "2026-W47", 100)
+    s.save_play_usage("kid-a", "pc1", "2026-W47", 50)
+    s.save_play_usage("kid-a", "pc2", "2026-W47", 70)
+    assert s.load_play_usage() == [("kid-a", "pc1", "2026-W47", 100), ("kid-a", "pc2", "2026-W47", 70)]
+    assert s.load_usage() == []
+
+
+def test_play_daily_keeps_max(tmp_path):
+    s = Store(str(tmp_path / "db.sqlite"))
+    s.record_play_daily("kid-a", "2026-11-16", "pc1", 100)
+    s.record_play_daily("kid-a", "2026-11-16", "pc1", 50)
+    s.record_play_daily("kid-a", "2026-11-16", "pc2", 70)
+    assert s.play_daily_totals("kid-a", "2026-11-16") == {"pc1": 100, "pc2": 70}
+    assert s.play_daily_totals("kid-a", "2026-11-17") == {}
+    assert s.daily_totals("kid-a", "2026-11-16") == {}
+
+
+def test_play_adjustments_accumulate(tmp_path):
+    s = Store(str(tmp_path / "db.sqlite"))
+    assert s.get_play_adjustment_s("kid-a", "2026-W47") == 0
+    assert s.add_play_adjustment_s("kid-a", "2026-W47", 900) == 900
+    assert s.add_play_adjustment_s("kid-a", "2026-W47", -300) == 600
+    assert s.get_play_adjustment_s("kid-a", "2026-W48") == 0
+    assert s.get_adjustment_s("kid-a", "2026-W47") == 0
+    assert s.get_play_day_adjustment_s("kid-a", "2026-11-16") == 0
+    assert s.add_play_day_adjustment_s("kid-a", "2026-11-16", 900) == 900
+    assert s.add_play_day_adjustment_s("kid-a", "2026-11-16", -100) == 800
+    assert s.get_day_adjustment_s("kid-a", "2026-11-16") == 0

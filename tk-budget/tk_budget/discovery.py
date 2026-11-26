@@ -15,6 +15,8 @@ STATUS_TOPIC = f"{topics.PREFIX}/_budget/status"
 LIMIT_KEY = "limit_active"  # "ON"/"OFF"; off (default) = no limit
 DAILY_KEY = "daily_limit_active"  # "ON"/"OFF"; off (default) = no daily limit
 COMBINED_KEY = "combined_limit_active"  # "ON"/"OFF"; PC + phone daily limit (Family Link kids only)
+PLAY_WEEK_KEY = "play_limit_active"  # "ON"/"OFF"; weekly play-time limit
+PLAY_DAY_KEY = "daily_play_active"  # "ON"/"OFF"; daily play-time limit
 MAX_DAILY_MIN = 24 * 60
 _KID_RE = re.compile(r"^[a-z0-9-][a-z0-9_-]*$")  # leading "_" is reserved (`_budget`)
 
@@ -181,6 +183,60 @@ def entities(kid: str) -> list[tuple[str, dict]]:
                                 ("logout", "Log out everywhere", "logout", "mdi:logout")):
         p = _base(kid, "button", obj, name)
         p.update(command_topic=topics.cmd(kid), payload_press=Cmd(op=op).to_json(), icon=icon)
+        out.append((_topic("button", kid, obj), p))
+
+    p = _base(kid, "switch", PLAY_WEEK_KEY, "Weekly play limit active")
+    p.update(state_topic=st, command_topic=set_topic(kid, PLAY_WEEK_KEY), payload_on="ON", payload_off="OFF",
+             value_template="{{ 'ON' if value_json.play_week_limited else 'OFF' }}", icon="mdi:gamepad-variant")
+    out.append((_topic("switch", kid, PLAY_WEEK_KEY), p))
+
+    p = _base(kid, "number", "weekly_play_budget", "Weekly play budget")
+    p.update(state_topic=st, command_topic=set_topic(kid, "weekly_play_min"),
+             value_template="{{ value_json.weekly_play_min }}", min=0, max=MAX_WEEKLY_MIN,
+             step=15, mode="box", unit_of_measurement="min", icon="mdi:calendar-clock")
+    out.append((_topic("number", kid, "weekly_play_budget"), p))
+
+    p = _base(kid, "switch", PLAY_DAY_KEY, "Daily play limit active")
+    p.update(state_topic=st, command_topic=set_topic(kid, PLAY_DAY_KEY), payload_on="ON", payload_off="OFF",
+             value_template="{{ 'ON' if value_json.play_daily_limited else 'OFF' }}",
+             icon="mdi:gamepad-variant-outline")
+    out.append((_topic("switch", kid, PLAY_DAY_KEY), p))
+
+    p = _base(kid, "number", "daily_play_limit", "Daily play limit")
+    p.update(state_topic=st, command_topic=set_topic(kid, "daily_play_min"),
+             value_template="{{ value_json.daily_play_min }}", min=0, max=MAX_DAILY_MIN,
+             step=5, mode="box", unit_of_measurement="min", icon="mdi:calendar-today")
+    out.append((_topic("number", kid, "daily_play_limit"), p))
+
+    p = _base(kid, "sensor", "play_today", "Play time today")
+    p.update(state_topic=st, unit_of_measurement="min", icon="mdi:gamepad-variant",
+             value_template="{{ (value_json.play_today_s / 60) | round(0) | int }}")
+    out.append((_topic("sensor", kid, "play_today"), p))
+
+    p = _base(kid, "sensor", "remaining_play", "Remaining play")
+    p.update(state_topic=st, unit_of_measurement="min", icon="mdi:timer-sand",
+             value_template="{{ ((value_json.play_remaining_s / 60) | round(0) | int)"
+                            " if value_json.play_limited else None }}")
+    out.append((_topic("sensor", kid, "remaining_play"), p))
+
+    for obj, name, key in (("play_week_left_pct", "Play week left", "play_week"),
+                           ("play_today_left_pct", "Play today left", "play_day")):
+        p = _base(kid, "sensor", obj, name)
+        p.update(state_topic=st, unit_of_measurement="%", icon="mdi:percent",
+                 value_template=f"{{{{ value_json.limits.{key}.pct if value_json.limits.{key}.on else None }}}}",
+                 json_attributes_topic=st,
+                 json_attributes_template=(
+                     f"{{% set l = value_json.limits.{key} %}}"
+                     "{{ ({'remaining_min': (l.remaining_s / 60) | round(0) | int,"
+                     " 'limit_min': (l.allowance_s / 60) | round(0) | int} if l.on"
+                     " else {'remaining_min': none, 'limit_min': none}) | tojson }}"))
+        out.append((_topic("sensor", kid, obj), p))
+
+    for obj, name, minutes in (("play_plus_15", "Play +15 min", 15), ("play_minus_15", "Play −15 min", -15)):
+        p = _base(kid, "button", obj, name)
+        p.update(command_topic=topics.cmd(kid),
+                 payload_press=Cmd(op="adjust_play", minutes=minutes).to_json(),
+                 icon="mdi:plus-circle" if minutes > 0 else "mdi:minus-circle")
         out.append((_topic("button", kid, obj), p))
 
     return out

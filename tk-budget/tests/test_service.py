@@ -206,7 +206,7 @@ def test_discovery_published_retained_on_start(env):
 def test_discovery_has_all_entities():
     ents = discovery.entities(KID)
     by_id = {p["unique_id"]: (t, p) for t, p in ents}
-    assert len(ents) == 16
+    assert len(ents) == 26
     expected = {
         "tk_kid-a_daily_total_limit": "number",
         "tk_kid-a_daily_limit_active": "switch",
@@ -224,6 +224,16 @@ def test_discovery_has_all_entities():
         "tk_kid-a_sessions": "sensor",
         "tk_kid-a_end_inactive_sessions": "button",
         "tk_kid-a_logout": "button",
+        "tk_kid-a_play_limit_active": "switch",
+        "tk_kid-a_weekly_play_budget": "number",
+        "tk_kid-a_daily_play_active": "switch",
+        "tk_kid-a_daily_play_limit": "number",
+        "tk_kid-a_play_today": "sensor",
+        "tk_kid-a_remaining_play": "sensor",
+        "tk_kid-a_play_week_left_pct": "sensor",
+        "tk_kid-a_play_today_left_pct": "sensor",
+        "tk_kid-a_play_plus_15": "button",
+        "tk_kid-a_play_minus_15": "button",
     }
     for uid, component in expected.items():
         topic, payload = by_id[uid]
@@ -513,3 +523,142 @@ def test_session_entities():
     lo = by_id["tk_kid-a_logout"]
     assert lo["name"] == "Log out everywhere" and lo["icon"] == "mdi:logout"
     assert Cmd.from_json(lo["payload_press"]) == Cmd(op="logout")
+
+
+# --- play limits ----------------------------------------------------------------
+
+def play_report(bus, host, play_s, play_day_s=None, total_s=0, kid=KID):
+    u = Usage(week="2026-W47", total_s=total_s, day="2026-11-16", total_day_s=total_s,
+              play_s=play_s, play_day_s=play_s if play_day_s is None else play_day_s)
+    bus.publish(topics.usage(host, kid), u.to_json(), retain=True)
+
+
+def set_play(bus, weekly=None, daily=None, week_on="ON", day_on="ON"):
+    if weekly is not None:
+        bus.publish(discovery.set_topic(KID, "weekly_play_min"), str(weekly))
+        bus.publish(discovery.set_topic(KID, "play_limit_active"), week_on)
+    if daily is not None:
+        bus.publish(discovery.set_topic(KID, "daily_play_min"), str(daily))
+        bus.publish(discovery.set_topic(KID, "daily_play_active"), day_on)
+
+
+def test_weekly_play_limit(env):
+    bus, *_ = env
+    set_play(bus, weekly=120)
+    play_report(bus, "pc1", 1800)
+    r = remaining(bus)
+    assert (r.play_s, r.play_limited) == (5400, True)
+    st = state(bus)
+    assert st["play_limited"] is True and st["play_week_limited"] is True
+    assert st["weekly_play_min"] == 120 and st["play_today_s"] == 1800
+    assert st["play_remaining_s"] == 5400
+    assert st["limits"]["play_week"]["remaining_s"] == 5400
+    assert st["limits"]["play_day"]["on"] is False
+
+
+def test_play_sums_over_hosts(env):
+    bus, *_ = env
+    set_play(bus, weekly=120)
+    play_report(bus, "pc1", 1800)
+    play_report(bus, "pc2", 600)
+    assert remaining(bus).play_s == 7200 - 2400
+    assert state(bus)["play_today_s"] == 2400
+
+
+def test_daily_play_binds(env):
+    bus, *_ = env
+    set_play(bus, weekly=120, daily=30)
+    play_report(bus, "pc1", 600)
+    assert remaining(bus).play_s == 1200
+    assert state(bus)["limits"]["play_day"]["remaining_s"] == 1200
+
+
+def test_play_capped_by_total(env):
+    bus, *_ = env
+    set_play(bus, weekly=120)
+    bus.publish(discovery.set_topic(KID, "weekly_total_min"), "15")
+    report(bus, "pc1", 0)
+    r = remaining(bus)
+    assert r.total_s == 900 and r.play_s == 900 and r.play_limited
+
+
+def test_play_off_means_unlimited_and_total_unchanged(env):
+    bus, *_ = env
+    set_play(bus, weekly=120)
+    set_play(bus, weekly=120, week_on="OFF")
+    play_report(bus, "pc1", 1800, total_s=600)
+    r = remaining(bus)
+    assert (r.play_limited, r.play_s) == (False, 0)
+    assert r.total_s == 36000 - 600 and r.limited
+    assert state(bus)["play_remaining_s"] == 0
+
+
+def test_play_limit_does_not_change_total(env):
+    bus, *_ = env
+    before = remaining(bus).total_s
+    set_play(bus, weekly=1, daily=1)
+    assert remaining(bus).total_s == before
+
+
+def test_adjust_play_changes_both_play_limits(env):
+    bus, store, *_ = env
+    set_play(bus, weekly=120, daily=30)
+    bus.publish(topics.cmd(KID), Cmd(op="adjust_play", minutes=15).to_json())
+    st = state(bus)
+    assert st["limits"]["play_week"]["allowance_s"] == 7200 + 900
+    assert st["limits"]["play_day"]["allowance_s"] == 1800 + 900
+    assert store.get_adjustment_s(KID, "2026-W47") == 0
+    assert remaining(bus).total_s == 36000
+
+
+def test_adjust_total_does_not_touch_play(env):
+    bus, *_ = env
+    set_play(bus, weekly=120)
+    bus.publish(topics.cmd(KID), Cmd(op="adjust_total", minutes=15).to_json())
+    assert state(bus)["limits"]["play_week"]["allowance_s"] == 7200
+
+
+def test_play_ledger_restored_after_restart(env, tmp_path):
+    bus, store, clock, svc = env
+    set_play(bus, weekly=120)
+    play_report(bus, "pc1", 1800)
+    bus2 = InMemoryBus()
+    svc2 = BudgetService(bus2, store, clock)
+    svc2.start()
+    r = Remaining.from_json(bus2.retained[topics.remaining(KID)])
+    assert r.play_s == 5400 and r.play_limited
+
+
+def test_play_settings_validation(env):
+    bus, store, *_ = env
+    bus.publish(discovery.set_topic(KID, "weekly_play_min"), "99999")
+    assert store.get_setting(KID, "weekly_play_min") == "10080"
+    bus.publish(discovery.set_topic(KID, "daily_play_min"), "-5")
+    assert store.get_setting(KID, "daily_play_min") == "0"
+    bus.publish(discovery.set_topic(KID, "daily_play_min"), "abc")
+    assert store.get_setting(KID, "daily_play_min") == "0"
+    bus.publish(discovery.set_topic(KID, "play_limit_active"), "maybe")
+    assert store.get_setting(KID, "play_limit_active") is None
+
+
+def test_play_entities():
+    by_id = {p["unique_id"]: p for _, p in discovery.entities(KID)}
+    sw = by_id["tk_kid-a_play_limit_active"]
+    assert sw["name"] == "Weekly play limit active" and "play_week_limited" in sw["value_template"]
+    assert sw["command_topic"] == discovery.set_topic(KID, "play_limit_active")
+    assert by_id["tk_kid-a_daily_play_active"]["command_topic"] == discovery.set_topic(KID, "daily_play_active")
+    w = by_id["tk_kid-a_weekly_play_budget"]
+    assert (w["step"], w["max"]) == (15, 10080)
+    assert w["command_topic"] == discovery.set_topic(KID, "weekly_play_min")
+    d = by_id["tk_kid-a_daily_play_limit"]
+    assert (d["step"], d["max"]) == (5, 1440)
+    assert d["command_topic"] == discovery.set_topic(KID, "daily_play_min")
+    assert by_id["tk_kid-a_play_today"]["unit_of_measurement"] == "min"
+    assert "play_limited" in by_id["tk_kid-a_remaining_play"]["value_template"]
+    for uid, key in (("tk_kid-a_play_week_left_pct", "play_week"), ("tk_kid-a_play_today_left_pct", "play_day")):
+        p = by_id[uid]
+        assert f"limits.{key}" in p["value_template"]
+        assert p["json_attributes_topic"] == discovery.state_topic(KID)
+        assert "none" in p["json_attributes_template"]
+    assert Cmd.from_json(by_id["tk_kid-a_play_plus_15"]["payload_press"]) == Cmd(op="adjust_play", minutes=15)
+    assert Cmd.from_json(by_id["tk_kid-a_play_minus_15"]["payload_press"]) == Cmd(op="adjust_play", minutes=-15)

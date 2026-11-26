@@ -16,7 +16,7 @@ def _attr_templates():
 
 def test_pct_attribute_templates_check_limit_on():
     tpls = _attr_templates()
-    assert len(tpls) == 3
+    assert len(tpls) == 5
     for t in tpls.values():
         assert ".on" in t
 
@@ -25,7 +25,9 @@ def test_pct_attribute_templates_render():
     jinja2 = pytest.importorskip("jinja2")
     env = jinja2.Environment()
     for uid, tpl in _attr_templates().items():
-        name = "week" if "week" in uid else "day" if "today" in uid else "combined"
+        name = {"tk_kid-a_week_left_pct": "week", "tk_kid-a_today_left_pct": "day",
+                "tk_kid-a_combined_left_pct": "combined", "tk_kid-a_play_week_left_pct": "play_week",
+                "tk_kid-a_play_today_left_pct": "play_day"}[uid]
 
         def render(on):
             lim = {"on": on, "remaining_s": 600, "allowance_s": 3600, "pct": 17}

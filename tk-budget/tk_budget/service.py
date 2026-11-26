@@ -42,6 +42,7 @@ class BudgetService:
         self._clock = clock
         self._kids: list[str] = []
         self._ledger = UsageLedger()
+        self._play_ledger = UsageLedger()
         self._sessions: dict[tuple[str, str], Sessions] = {}  # (host, kid) -> latest report
         self._last: dict[str, tuple[str, str]] = {}  # kid -> (remaining json, state json)
         self._lock = threading.RLock()
@@ -50,6 +51,8 @@ class BudgetService:
     def start(self) -> None:
         for kid, host, week, total_s in self._store.load_usage():
             self._ledger.restore(host, kid, week, total_s)
+        for kid, host, week, play_s in self._store.load_play_usage():
+            self._play_ledger.restore(host, kid, week, play_s)
         self._bus.publish(discovery.STATUS_TOPIC, "online", retain=True)
         for kid in self._store.kids():
             self._announce(kid)
@@ -126,6 +129,9 @@ class BudgetService:
         self._ledger.update(host, kid, u.week, u.total_s, u.day, u.total_day_s)
         self._store.save_usage(kid, host, u.week, u.total_s)
         self._store.record_daily(kid, u.day, host, u.total_day_s)
+        self._play_ledger.update(host, kid, u.week, u.play_s, u.day, u.play_day_s)
+        self._store.save_play_usage(kid, host, u.week, u.play_s)
+        self._store.record_play_daily(kid, u.day, host, u.play_day_s)
         self._publish(kid, force=False)
 
     @_locked
@@ -167,6 +173,9 @@ class BudgetService:
         if c.op == "adjust_total":
             self._store.add_adjustment_s(kid, self._week(), c.minutes * 60)
             self._store.add_day_adjustment_s(kid, self._clock.now().date().isoformat(), c.minutes * 60)
+        elif c.op == "adjust_play":
+            self._store.add_play_adjustment_s(kid, self._week(), c.minutes * 60)
+            self._store.add_play_day_adjustment_s(kid, self._clock.now().date().isoformat(), c.minutes * 60)
         elif c.op in ("end_inactive", "logout"):
             ts = self._clock.now().isoformat(timespec="seconds")
             self._bus.publish(topics.action(kid), Action(op=c.op, ts=ts).to_json(), retain=False)
@@ -201,6 +210,14 @@ class BudgetService:
                 return
             minutes = max(0, min(discovery.MAX_DAILY_MIN, minutes))
             self._store.set_setting(kid, key, str(minutes))
+        elif key in ("weekly_play_min", "daily_play_min"):
+            try:
+                minutes = int(float(payload))
+            except ValueError:
+                log.warning("ignoring %s %r", key, payload)
+                return
+            top = discovery.MAX_WEEKLY_MIN if key == "weekly_play_min" else discovery.MAX_DAILY_MIN
+            self._store.set_setting(kid, key, str(max(0, min(top, minutes))))
         elif key == "combined_total_min" and kid in self._phone_kids:
             try:
                 minutes = int(float(payload))
@@ -209,7 +226,8 @@ class BudgetService:
                 return
             minutes = max(0, min(discovery.MAX_DAILY_MIN, minutes))
             self._store.set_setting(kid, key, str(minutes))
-        elif key in (discovery.LIMIT_KEY, discovery.DAILY_KEY) or (
+        elif key in (discovery.LIMIT_KEY, discovery.DAILY_KEY, discovery.PLAY_WEEK_KEY,
+                     discovery.PLAY_DAY_KEY) or (
                 key == discovery.COMBINED_KEY and kid in self._phone_kids):
             if payload not in ("ON", "OFF"):
                 log.warning("ignoring %s %r", key, payload)
@@ -259,7 +277,21 @@ class BudgetService:
         comb_lim = limit("combined", combined_on, combined_min, day_adj, today_s + phone_s)
         limited, eff = effective([week_lim, day_lim, comb_lim])
         rem = eff if limited else week_lim.remaining_s
-        rem_json = Remaining(week=week, total_s=eff if limited else 0, limited=limited).to_json()
+        play_week_min = int(self._store.get_setting(kid, "weekly_play_min", "0") or 0)  # unset = 0: fail closed
+        play_day_min = int(self._store.get_setting(kid, "daily_play_min", "0") or 0)
+        play_week_on = self._store.get_setting(kid, discovery.PLAY_WEEK_KEY) == "ON"
+        play_day_on = self._store.get_setting(kid, discovery.PLAY_DAY_KEY) == "ON"
+        play_today_s = sum(self._store.play_daily_totals(kid, day).values())
+        play_week_lim = limit("play_week", play_week_on, play_week_min,
+                              self._store.get_play_adjustment_s(kid, week), self._play_ledger.used_s(kid, week))
+        play_day_lim = limit("play_day", play_day_on, play_day_min,
+                             self._store.get_play_day_adjustment_s(kid, day), play_today_s)
+        play_limited, play_rem = effective([play_week_lim, play_day_lim])
+        if play_limited and limited:
+            play_rem = min(play_rem, eff)
+        play_s = play_rem if play_limited else 0
+        rem_json = Remaining(week=week, total_s=eff if limited else 0, limited=limited,
+                         play_s=play_s, play_limited=play_limited).to_json()
         by_host = {h: v.count for (h, k), v in sorted(self._sessions.items()) if k == kid and v.count > 0}
         state_json = json.dumps({
             "sessions": sum(by_host.values()),
@@ -280,7 +312,14 @@ class BudgetService:
             "phone_today_s": phone_s,
             "limits": {lim.key: {"on": lim.active, "allowance_s": lim.allowance_s,
                                  "remaining_s": lim.remaining_s, "pct": lim.pct}
-                       for lim in (week_lim, day_lim, comb_lim)},
+                       for lim in (week_lim, day_lim, comb_lim, play_week_lim, play_day_lim)},
+            "play_limited": play_limited,
+            "play_week_limited": play_week_on,
+            "play_daily_limited": play_day_on,
+            "weekly_play_min": play_week_min,
+            "daily_play_min": play_day_min,
+            "play_today_s": play_today_s,
+            "play_remaining_s": play_s,
             "time_up_action": self._time_up_action(kid),
         }, sort_keys=True)
         if not force and self._last.get(kid) == (rem_json, state_json):
