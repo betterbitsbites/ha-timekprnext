@@ -86,8 +86,9 @@ def combined_entities(kid: str) -> list[tuple[str, dict]]:
              json_attributes_topic=st,
              json_attributes_template=(
                  "{% set l = value_json.limits.combined %}"
-                 "{{ {'remaining_min': (l.remaining_s / 60) | round(0) | int,"
-                 " 'limit_min': (l.allowance_s / 60) | round(0) | int} | tojson }}"))
+                 "{{ ({'remaining_min': (l.remaining_s / 60) | round(0) | int,"
+                 " 'limit_min': (l.allowance_s / 60) | round(0) | int} if l.on"
+                 " else {'remaining_min': none, 'limit_min': none}) | tojson }}"))
     out.append((_topic("sensor", kid, "combined_left_pct"), p))
 
     p = _base(kid, "sensor", "phone_today", "Phone time today")
@@ -163,8 +164,9 @@ def entities(kid: str) -> list[tuple[str, dict]]:
                  json_attributes_topic=st,
                  json_attributes_template=(
                      f"{{% set l = value_json.limits.{key} %}}"
-                     "{{ {'remaining_min': (l.remaining_s / 60) | round(0) | int,"
-                     " 'limit_min': (l.allowance_s / 60) | round(0) | int} | tojson }}"))
+                     "{{ ({'remaining_min': (l.remaining_s / 60) | round(0) | int,"
+                     " 'limit_min': (l.allowance_s / 60) | round(0) | int} if l.on"
+                     " else {'remaining_min': none, 'limit_min': none}) | tojson }}"))
         out.append((_topic("sensor", kid, obj), p))
 
     return out

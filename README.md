@@ -81,14 +81,14 @@ journalctl -u tk-agent -f
 
 Entity ids for kid `kid-a` (`-` becomes `_`). tk-budget ≥ 0.3.1 sets them via `default_entity_id`; HA applies that only when it first creates an entity. Devices created by 0.3.0 got ids like `sensor.screen_time_kid_a_remaining_total`: delete the device in HA and restart tk-budget to get the ids below (budget and settings are kept in tk-budget).
 
-The card below is one whole card element. The three tiles show the percent left per limit with a bar (tile feature `bar-gauge`) and the remaining minutes as secondary text; the combined rows exist only for kids with a Family Link mapping, remove them otherwise.
+The card below is one whole card element. The three tiles show the percent left per limit with a bar (tile feature `bar-gauge`) and the remaining minutes as secondary text; the combined and phone rows exist only for kids with a Family Link mapping, remove them otherwise.
 
 ```yaml
 type: vertical-stack
 cards:
   - type: tile
     entity: sensor.tk_kid_a_week_left_pct
-    name: Week left
+    name: Week (min left)
     state_content:
       - state
       - remaining_min
@@ -98,7 +98,7 @@ cards:
         max: 100
   - type: tile
     entity: sensor.tk_kid_a_today_left_pct
-    name: Today left
+    name: Today (min left)
     state_content:
       - state
       - remaining_min
@@ -108,7 +108,7 @@ cards:
         max: 100
   - type: tile
     entity: sensor.tk_kid_a_combined_left_pct
-    name: PC + phone left
+    name: PC + phone (min left)
     state_content:
       - state
       - remaining_min

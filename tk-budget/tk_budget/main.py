@@ -18,7 +18,7 @@ from tk_protocol.bus import PahoBus
 from tk_protocol.clock import SystemClock
 
 from . import discovery
-from .familylink import Fetch, read_minutes
+from .familylink import Fetch, PhonePoller
 from .service import BudgetService
 from .store import Store
 
@@ -98,18 +98,17 @@ def main() -> None:
                   client_id="tk-budget", will_topic=discovery.STATUS_TOPIC, will_payload="offline")
     phone = opts["familylink"]
     service = BudgetService(bus, store, SystemClock(), phone_kids=phone.keys())
+    poller = PhonePoller(phone, os.environ, _urllib_fetch)
     service.start()
     log.info("tk-budget running; known kids: %s", ", ".join(store.kids()) or "none yet")
     log.info("Family Link kids: %s", ", ".join(phone) or "none")
     while True:
         time.sleep(TICK_S)
-        for kid, entity in phone.items():
-            try:
-                minutes = read_minutes(entity, os.environ, _urllib_fetch)
-                if minutes is not None:
-                    service.set_phone_minutes(kid, minutes)
-            except Exception:
-                log.exception("family link update for %s failed", kid)
+        try:
+            for kid, minutes in poller.poll().items():
+                service.set_phone_minutes(kid, minutes)
+        except Exception:
+            log.exception("family link update failed")
         try:
             service.tick()
         except Exception:

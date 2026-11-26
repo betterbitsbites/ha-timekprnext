@@ -115,8 +115,8 @@ counts as 0 (fail closed, as today).
   Hosts whose `status` is `offline` count 0.
 - Family Link: add-on option `familylink` = list of `{kid, entity}` (entity =
   `sensor.<child>_daily_screen_time`, minutes today, all the child's devices). `homeassistant_api:
-  true`; every 60 s GET `http://supervisor/core/api/states/<entity>`. Value stored as host
-  `familylink` in the daily statistics (so it shows separately) and used only by the combined limit.
+  true`; every tick (30 s) GET `http://supervisor/core/api/states/<entity>`. Value stored as host
+  `_familylink` in the daily statistics (so it shows separately) and used only by the combined limit.
   Missing/unavailable/non-numeric → keep the last value for today (no invented usage). Day boundary:
   after midnight, a value is accepted for the new day only once it is lower than yesterday's last
   value or after 00:15, because the integration resets "at the first refresh of the day".
