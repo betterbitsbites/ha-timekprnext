@@ -13,6 +13,8 @@ DEFAULT_TIME_UP_ACTION = "lock"  # chosen by the human partner
 MAX_WEEKLY_MIN = 7 * 24 * 60
 STATUS_TOPIC = f"{topics.PREFIX}/_budget/status"
 LIMIT_KEY = "limit_active"  # "ON"/"OFF"; off (default) = no limit
+DAILY_KEY = "daily_limit_active"  # "ON"/"OFF"; off (default) = no daily limit
+MAX_DAILY_MIN = 24 * 60
 _KID_RE = re.compile(r"^[a-z0-9-][a-z0-9_-]*$")  # leading "_" is reserved (`_budget`)
 
 
@@ -80,9 +82,39 @@ def entities(kid: str) -> list[tuple[str, dict]]:
              icon="mdi:power")
     out.append((_topic("select", kid, "time_up_action"), p))
 
-    p = _base(kid, "switch", LIMIT_KEY, "Limit active")
+    p = _base(kid, "switch", LIMIT_KEY, "Weekly limit active")
     p.update(state_topic=st, command_topic=set_topic(kid, LIMIT_KEY), payload_on="ON", payload_off="OFF",
-             value_template="{{ 'ON' if value_json.limited else 'OFF' }}", icon="mdi:timer-lock")
+             value_template="{{ 'ON' if value_json.week_limited else 'OFF' }}", icon="mdi:timer-lock")
     out.append((_topic("switch", kid, LIMIT_KEY), p))
+
+    p = _base(kid, "number", "daily_total_limit", "Daily total limit")
+    p.update(state_topic=st, command_topic=set_topic(kid, "daily_total_min"),
+             value_template="{{ value_json.daily_total_min }}", min=0, max=MAX_DAILY_MIN,
+             step=5, mode="box", unit_of_measurement="min", icon="mdi:calendar-today")
+    out.append((_topic("number", kid, "daily_total_limit"), p))
+
+    p = _base(kid, "switch", DAILY_KEY, "Daily limit active")
+    p.update(state_topic=st, command_topic=set_topic(kid, DAILY_KEY), payload_on="ON", payload_off="OFF",
+             value_template="{{ 'ON' if value_json.daily_limited else 'OFF' }}", icon="mdi:timer-lock-outline")
+    out.append((_topic("switch", kid, DAILY_KEY), p))
+
+    for obj, name, key, icon in (("remaining_week", "Remaining this week", "week", "mdi:timer-sand"),
+                                 ("remaining_today", "Remaining today", "day", "mdi:timer-sand")):
+        p = _base(kid, "sensor", obj, name)
+        p.update(state_topic=st, unit_of_measurement="min", icon=icon,
+                 value_template=f"{{{{ ((value_json.limits.{key}.remaining_s / 60) | round(0) | int)"
+                                f" if value_json.limits.{key}.on else None }}}}")
+        out.append((_topic("sensor", kid, obj), p))
+
+    for obj, name, key in (("week_left_pct", "Week left", "week"), ("today_left_pct", "Today left", "day")):
+        p = _base(kid, "sensor", obj, name)
+        p.update(state_topic=st, unit_of_measurement="%", icon="mdi:percent",
+                 value_template=f"{{{{ value_json.limits.{key}.pct if value_json.limits.{key}.on else None }}}}",
+                 json_attributes_topic=st,
+                 json_attributes_template=(
+                     f"{{% set l = value_json.limits.{key} %}}"
+                     "{{ {'remaining_min': (l.remaining_s / 60) | round(0) | int,"
+                     " 'limit_min': (l.allowance_s / 60) | round(0) | int} | tojson }}"))
+        out.append((_topic("sensor", kid, obj), p))
 
     return out

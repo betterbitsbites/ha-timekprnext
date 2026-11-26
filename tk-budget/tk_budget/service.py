@@ -17,7 +17,7 @@ from tk_protocol.clock import Clock
 from tk_protocol.payloads import Cmd, Remaining, Settings, Usage
 
 from . import discovery
-from .engine import UsageLedger, remaining_total_s, week_key
+from .engine import UsageLedger, effective, limit, week_key
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -111,6 +111,7 @@ class BudgetService:
             return
         if c.op == "adjust_total":
             self._store.add_adjustment_s(kid, self._week(), c.minutes * 60)
+            self._store.add_day_adjustment_s(kid, self._clock.now().date().isoformat(), c.minutes * 60)
         self._publish(kid, force=False)
 
     @_locked
@@ -133,9 +134,17 @@ class BudgetService:
                 return
             self._store.set_setting(kid, key, payload)
             self._publish_settings(kid)
-        elif key == discovery.LIMIT_KEY:
+        elif key == "daily_total_min":
+            try:
+                minutes = int(float(payload))
+            except ValueError:
+                log.warning("ignoring daily_total_min %r", payload)
+                return
+            minutes = max(0, min(discovery.MAX_DAILY_MIN, minutes))
+            self._store.set_setting(kid, key, str(minutes))
+        elif key in (discovery.LIMIT_KEY, discovery.DAILY_KEY):
             if payload not in ("ON", "OFF"):
-                log.warning("ignoring limit_active %r", payload)
+                log.warning("ignoring %s %r", key, payload)
                 return
             self._store.set_setting(kid, key, payload)
         else:
@@ -163,20 +172,34 @@ class BudgetService:
 
     def _publish(self, kid: str, force: bool) -> None:
         today = self._clock.now().date()
+        day = today.isoformat()
         week = week_key(today)
         budget = self._budget_min(kid)
-        adjustment = self._store.get_adjustment_s(kid, week)
-        rem = remaining_total_s(budget, adjustment, self._ledger.used_s(kid, week))
-        limited = self._limited(kid)
-        rem_json = Remaining(week=week, total_s=rem if limited else 0, limited=limited).to_json()
+        daily_min = int(self._store.get_setting(kid, "daily_total_min", "0") or 0)  # unset = 0: fail closed
+        week_adj = self._store.get_adjustment_s(kid, week)
+        day_adj = self._store.get_day_adjustment_s(kid, day)
+        week_on = self._limited(kid)
+        day_on = self._store.get_setting(kid, discovery.DAILY_KEY) == "ON"
+        today_s = sum(v for h, v in self._store.daily_totals(kid, day).items() if h != "_familylink")
+        week_lim = limit("week", week_on, budget, week_adj, self._ledger.used_s(kid, week))
+        day_lim = limit("day", day_on, daily_min, day_adj, today_s)
+        limited, eff = effective([week_lim, day_lim])
+        rem = eff if limited else week_lim.remaining_s
+        rem_json = Remaining(week=week, total_s=eff if limited else 0, limited=limited).to_json()
         state_json = json.dumps({
             "week": week,
-            "day": today.isoformat(),
+            "day": day,
             "weekly_total_min": budget,
+            "daily_total_min": daily_min,
             "limited": limited,
-            "adjustment_min": adjustment // 60,
+            "week_limited": week_on,
+            "daily_limited": day_on,
+            "adjustment_min": week_adj // 60,
             "remaining_s": rem,
-            "today_s": sum(self._store.daily_totals(kid, today.isoformat()).values()),
+            "today_s": today_s,
+            "limits": {lim.key: {"on": lim.active, "allowance_s": lim.allowance_s,
+                                 "remaining_s": lim.remaining_s, "pct": lim.pct}
+                       for lim in (week_lim, day_lim)},
             "time_up_action": self._time_up_action(kid),
         }, sort_keys=True)
         if not force and self._last.get(kid) == (rem_json, state_json):

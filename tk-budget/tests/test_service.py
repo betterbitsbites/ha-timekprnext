@@ -206,8 +206,14 @@ def test_discovery_published_retained_on_start(env):
 def test_discovery_has_all_entities():
     ents = discovery.entities(KID)
     by_id = {p["unique_id"]: (t, p) for t, p in ents}
-    assert len(ents) == 7
+    assert len(ents) == 13
     expected = {
+        "tk_kid-a_daily_total_limit": "number",
+        "tk_kid-a_daily_limit_active": "switch",
+        "tk_kid-a_remaining_week": "sensor",
+        "tk_kid-a_remaining_today": "sensor",
+        "tk_kid-a_week_left_pct": "sensor",
+        "tk_kid-a_today_left_pct": "sensor",
         "tk_kid-a_remaining_total": "sensor",
         "tk_kid-a_total_today": "sensor",
         "tk_kid-a_weekly_total_budget": "number",
@@ -228,6 +234,15 @@ def test_discovery_has_all_entities():
     sw = by_id["tk_kid-a_limit_active"][1]
     assert sw["command_topic"] == discovery.set_topic(KID, "limit_active")
     assert (sw["payload_on"], sw["payload_off"]) == ("ON", "OFF")
+    assert sw["name"] == "Weekly limit active" and "week_limited" in sw["value_template"]
+    num = by_id["tk_kid-a_daily_total_limit"][1]
+    assert num["command_topic"] == discovery.set_topic(KID, "daily_total_min")
+    assert (num["step"], num["max"]) == (5, 1440)
+    for uid in ("tk_kid-a_week_left_pct", "tk_kid-a_today_left_pct"):
+        p = by_id[uid][1]
+        assert p["unit_of_measurement"] == "%"
+        assert p["json_attributes_topic"] == discovery.state_topic(KID)
+        assert "remaining_min" in p["json_attributes_template"] and "limit_min" in p["json_attributes_template"]
 
 
 def test_upgrade_kid_with_budget_stays_limited(tmp_path):
@@ -247,3 +262,89 @@ def test_discovery_sets_default_entity_id():
         component, obj = topic.split("/")[1], topic.split("/")[3]
         assert p["default_entity_id"] == f"{component}.tk_kid_a_{obj}"
         assert "object_id" not in p
+
+
+def state(bus, kid=KID):
+    return json.loads(bus.retained[discovery.state_topic(kid)])
+
+
+def set_daily(bus, minutes, on="ON"):
+    if minutes is not None:
+        bus.publish(discovery.set_topic(KID, "daily_total_min"), str(minutes))
+    bus.publish(discovery.set_topic(KID, "daily_limit_active"), on)
+
+
+def test_daily_limit_binds(env):
+    bus, *_ = env
+    set_daily(bus, 60)
+    report(bus, "pc1", 1800, day_s=1800)
+    assert remaining(bus).total_s == 1800
+    st = state(bus)
+    assert st["limits"]["day"]["pct"] == 50
+    assert st["limits"]["week"]["remaining_s"] == 36000 - 1800
+
+
+def test_daily_only_kid_is_limited(env):
+    bus, *_ = env
+    bus.publish(discovery.set_topic(KID, "limit_active"), "OFF")
+    set_daily(bus, 30)
+    assert remaining(bus) == Remaining(week="2026-W47", total_s=1800, limited=True)
+    st = state(bus)
+    assert st["week_limited"] is False and st["limited"] is True and st["daily_limited"] is True
+
+
+def test_daily_on_without_value_is_zero(env):
+    bus, *_ = env
+    set_daily(bus, None)
+    assert remaining(bus).total_s == 0
+    assert remaining(bus).limited is True
+
+
+def test_adjust_adds_to_week_and_today(env):
+    bus, store, clock, svc = env
+    set_daily(bus, 60)
+    bus.publish(topics.cmd(KID), Cmd(op="adjust_total", minutes=15).to_json())
+    assert remaining(bus).total_s == 4500
+    clock.set(datetime(2026, 11, 17, 0, 0, 30))
+    svc.tick()
+    st = state(bus)
+    assert st["limits"]["day"]["allowance_s"] == 3600
+    assert st["limits"]["week"]["allowance_s"] == 36000 + 900
+
+
+def test_day_rollover_by_tick(env):
+    bus, store, clock, svc = env
+    set_daily(bus, 60)
+    report(bus, "pc1", 3600, day_s=3600)
+    assert remaining(bus).total_s == 0
+    clock.set(datetime(2026, 11, 17, 0, 0, 30))
+    svc.tick()
+    assert remaining(bus).total_s == 3600
+
+
+def test_today_excludes_familylink_host(env):
+    bus, store, *_ = env
+    store.record_daily(KID, "2026-11-16", "_familylink", 1200)
+    report(bus, "pc1", 600, day_s=600)
+    assert state(bus)["today_s"] == 600
+
+
+def test_limit_switch_reflects_weekly_only(env):
+    bus, *_ = env
+    bus.publish(discovery.set_topic(KID, "limit_active"), "OFF")
+    set_daily(bus, 30)
+    assert state(bus)["week_limited"] is False
+    sw = dict((p["unique_id"], p) for _, p in discovery.entities(KID))["tk_kid-a_limit_active"]
+    assert "week_limited" in sw["value_template"]
+
+
+def test_daily_settings_validation(env):
+    bus, store, *_ = env
+    bus.publish(discovery.set_topic(KID, "daily_total_min"), "nope")
+    assert store.get_setting(KID, "daily_total_min") is None
+    bus.publish(discovery.set_topic(KID, "daily_total_min"), "99999")
+    assert store.get_setting(KID, "daily_total_min") == "1440"
+    bus.publish(discovery.set_topic(KID, "daily_total_min"), "-5")
+    assert store.get_setting(KID, "daily_total_min") == "0"
+    bus.publish(discovery.set_topic(KID, "daily_limit_active"), "maybe")
+    assert store.get_setting(KID, "daily_limit_active") is None
