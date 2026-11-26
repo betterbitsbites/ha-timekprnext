@@ -15,6 +15,7 @@ from tk_protocol.clock import SystemClock
 from .agent import Agent
 from .config import load
 from .meter import UsageMeter
+from .sessions import Loginctl
 from .timekpra import Timekpra
 
 log = logging.getLogger("tk_agent")
@@ -34,7 +35,7 @@ def main() -> None:
                   client_id=f"tk-agent-{cfg.host_id}",
                   will_topic=topics.status(cfg.host_id), will_payload="offline")
     agent = Agent(cfg, bus, Timekpra(),
-                  lambda user: UsageMeter(os.path.join(cfg.state_dir, f"{user}.json"), clock), clock)
+                  lambda user: UsageMeter(os.path.join(cfg.state_dir, f"{user}.json"), clock), clock, Loginctl())
     agent.start()
     log.info("tk-agent %s running for all timekpr users", cfg.host_id)
     while True:

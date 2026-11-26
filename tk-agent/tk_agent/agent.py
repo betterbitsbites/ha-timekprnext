@@ -26,10 +26,11 @@ from typing import Callable, Protocol
 from tk_protocol import topics
 from tk_protocol.bus import Bus
 from tk_protocol.clock import Clock
-from tk_protocol.payloads import Event, Remaining, Settings, Usage
+from tk_protocol.payloads import Action, Event, Remaining, Settings, Sessions, Usage
 
 from .config import Config
 from .meter import UsageMeter
+from .sessions import Session, inactive
 from .timekpra import LOCKOUT_TYPES
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ log = logging.getLogger(__name__)
 MAX_TIME_LEFT_S = 24 * 3600
 TIME_LOW_S = 300
 WRITE_TOLERANCE_S = 60
+ACTION_MAX_AGE_S = 120
 _ID_RE = re.compile(r"^[a-z0-9_-]+$")
 
 
@@ -45,6 +47,12 @@ class TimekpraLike(Protocol):
     def time_left_s(self, user: str) -> int | None: ...
     def set_time_left_s(self, user: str, seconds: int) -> None: ...
     def set_lockout_type(self, user: str, value: str) -> None: ...
+
+
+class SessionsLike(Protocol):
+    def sessions(self, user: str) -> list[Session]: ...
+    def terminate_session(self, session_id: str) -> None: ...
+    def terminate_user(self, user: str) -> None: ...
 
 
 @dataclass
@@ -67,11 +75,15 @@ def _locked(fn):
 
 class Agent:
     def __init__(self, cfg: Config, bus: Bus, timekpra: TimekpraLike,
-                 meter_factory: Callable[[str], UsageMeter], clock: Clock) -> None:
+                 meter_factory: Callable[[str], UsageMeter], clock: Clock,
+                 sessions: SessionsLike | None = None) -> None:
         self.cfg = cfg
         self._bus = bus
         self._tk = timekpra
         self._clock = clock
+        self._sessions = sessions
+        self._sess_sent: dict[str, Sessions] = {}  # last published per user (empty after start)
+        self._sess_warned: set[str] = set()
         self._lock = threading.RLock()
         self._meter_factory = meter_factory
         self._users: list[str] = []  # last good timekpr user list (valid names only)
@@ -93,6 +105,8 @@ class Agent:
         self._bus.subscribe(topics.usage(host, "+"), self._on_own_usage)
         self._bus.subscribe(topics.remaining("+"), self._on_remaining)
         self._bus.subscribe(topics.settings("+"), self._on_settings)
+        if self._sessions is not None:
+            self._bus.subscribe(topics.action("+"), self._on_action)
 
     @_locked
     def tick(self) -> None:
@@ -152,6 +166,7 @@ class Agent:
         week, day = meter.current_week(), meter.current_day()
         u = Usage(week=week, total_s=meter.week_total_s(week), day=day, total_day_s=meter.day_total_s(day))
         self._bus.publish(topics.usage(self.cfg.host_id, kid), u.to_json(), retain=True)
+        self._report_sessions(user)
         if left is None:
             return  # not logged in: uses no time, and timekpr ignores writes until login
 
@@ -176,6 +191,22 @@ class Agent:
             self._tk.set_time_left_s(user, target)
             self._wrote(user)
         self._events(user, kid, target)
+
+    def _report_sessions(self, user: str) -> None:
+        if self._sessions is None:
+            return
+        try:
+            found = self._sessions.sessions(user)
+        except Exception as e:
+            if user not in self._sess_warned:
+                self._sess_warned.add(user)
+                log.warning("loginctl failed for %s (%s); not reporting sessions", user, e)
+            return
+        self._sess_warned.discard(user)
+        report = Sessions(count=len(found), locked=sum(1 for s in found if s.locked))
+        if self._sess_sent.get(user) != report:
+            self._bus.publish(topics.sessions(self.cfg.host_id, user), report.to_json(), retain=True)
+            self._sess_sent[user] = report
 
     def _wrote(self, user: str) -> None:
         back = self._tk.time_left_s(user)  # read back: exit codes prove nothing
@@ -260,6 +291,39 @@ class Agent:
         except ValueError:
             return
         self._meters[user].seed(u.week, u.total_s, u.day, u.total_day_s)
+
+    @_locked
+    def _on_action(self, topic: str, payload: str) -> None:
+        if self._sessions is None:
+            return
+        user = topic.split("/")[1]
+        if user not in self._users:
+            return  # not a kid on this PC: ignore, never park
+        try:
+            a = Action.from_json(payload)
+        except ValueError as e:
+            log.warning("ignoring malformed action on %s: %s", topic, e)
+            return
+        try:
+            age = (self._clock.now() - datetime.fromisoformat(a.ts)).total_seconds()
+        except (ValueError, TypeError) as e:
+            log.warning("ignoring action on %s with unusable ts %r: %s", topic, a.ts, e)
+            return
+        if abs(age) > ACTION_MAX_AGE_S:
+            log.warning("ignoring stale action %s for %s (ts %s)", a.op, user, a.ts)
+            return
+        try:
+            if a.op == "logout":
+                self._sessions.terminate_user(user)
+                log.info("logged out %s on request", user)
+            else:
+                ended = [s.id for s in self._sessions.sessions(user) if inactive(s)]
+                for sid in ended:
+                    self._sessions.terminate_session(sid)
+                log.info("ended inactive sessions %s of %s on request", ended, user)
+        except Exception as e:
+            log.warning("action %s for %s failed: %s", a.op, user, e)
+        self._sess_sent.pop(user, None)  # republish on the next tick
 
     # --- snapshot persistence ---------------------------------------------------
 

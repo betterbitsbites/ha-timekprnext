@@ -9,7 +9,8 @@ from tk_agent.meter import UsageMeter
 from tk_protocol import topics
 from tk_protocol.bus import InMemoryBus
 from tk_protocol.clock import FixedClock
-from tk_protocol.payloads import Event, Remaining, Settings, Usage
+from tk_agent.sessions import LoginctlError, Session
+from tk_protocol.payloads import Action, Event, Remaining, Settings, Sessions, Usage
 
 USER = KID = "kid-a"  # the timekpr user name is the kid id
 HOST = "pc1"
@@ -60,6 +61,42 @@ class FakeTimekpra:
         self.left -= used
         self.consumed += used
         self.clock.set(self.clock.now() + timedelta(seconds=seconds))
+
+
+class FakeSessions:
+    def __init__(self) -> None:
+        self.by_user: dict[str, list[Session]] = {}
+        self.error: Exception | None = None
+        self.ended_sessions: list[str] = []
+        self.ended_users: list[str] = []
+
+    def sessions(self, user: str) -> list[Session]:
+        if self.error:
+            raise self.error
+        return list(self.by_user.get(user, []))
+
+    def terminate_session(self, session_id: str) -> None:
+        self.ended_sessions.append(session_id)
+
+    def terminate_user(self, user: str) -> None:
+        self.ended_users.append(user)
+
+
+def sess(id, state="active", locked=False):
+    return Session(id=id, cls="user", type="wayland", state=state, locked=locked, remote=False)
+
+
+@pytest.fixture
+def senv(env):
+    agent, bus, tk, clock = env
+    fs = FakeSessions()
+    agent = Agent(agent.cfg, bus, tk, agent._meter_factory, clock, fs)
+    agent.start()
+    return agent, bus, tk, clock, fs
+
+
+def published_sessions(bus):
+    return [Sessions.from_json(p) for t, p, _ in bus.published if t == topics.sessions(HOST, KID)]
 
 
 @pytest.fixture
@@ -432,3 +469,114 @@ def test_release_waits_for_login(env):
     tk.logged_out.discard(USER)
     agent.tick()
     assert tk.writes == [(USER, 0), (USER, 86400)]
+
+
+# --- sessions ---------------------------------------------------------------------------
+
+def test_sessions_published_retained_once_and_on_change(senv):
+    agent, bus, tk, clock, fs = senv
+    fs.by_user[USER] = [sess("5", locked=True)]
+    agent.tick()
+    agent.tick()
+    assert json.loads(bus.retained[topics.sessions(HOST, KID)]) == {"count": 1, "locked": 1}
+    assert [r for t, _, r in bus.published if t == topics.sessions(HOST, KID)] == [True]
+    assert published_sessions(bus) == [Sessions(1, 1)]
+    fs.by_user[USER] = [sess("5", locked=True), sess("8")]
+    agent.tick()
+    assert published_sessions(bus) == [Sessions(1, 1), Sessions(2, 1)]
+
+
+def test_sessions_published_first_tick_even_if_retained_exists(senv):
+    agent, bus, tk, clock, fs = senv
+    bus.publish(topics.sessions(HOST, KID), Sessions(0, 0).to_json(), retain=True)
+    agent.tick()
+    assert published_sessions(bus) == [Sessions(0, 0), Sessions(0, 0)]
+
+
+def test_sessions_published_for_logged_out_user(senv):
+    agent, bus, tk, clock, fs = senv
+    tk.logged_out.add(USER)
+    agent.tick()
+    agent.tick()
+    assert published_sessions(bus) == [Sessions(0, 0)]
+
+
+def test_sessions_error_warns_once_and_publishes_nothing(senv, caplog):
+    agent, bus, tk, clock, fs = senv
+    fs.error = LoginctlError("boom")
+    with caplog.at_level("WARNING"):
+        agent.tick()
+        agent.tick()
+    assert published_sessions(bus) == []
+    assert len([r for r in caplog.records if "loginctl" in r.getMessage()]) == 1
+    fs.error = None
+    agent.tick()
+    assert len(published_sessions(bus)) == 1
+    fs.error = LoginctlError("again")
+    with caplog.at_level("WARNING"):
+        agent.tick()
+    assert len([r for r in caplog.records if "loginctl" in r.getMessage()]) == 2
+
+
+def action(bus, op, ts, kid=KID, retain=False):
+    bus.publish(topics.action(kid), Action(op=op, ts=ts).to_json(), retain=retain)
+
+
+def test_end_inactive_terminates_only_inactive(senv):
+    agent, bus, tk, clock, fs = senv
+    fs.by_user[USER] = [sess("1", locked=True), sess("2"), sess("3", state="online")]
+    agent.tick()
+    action(bus, "end_inactive", clock.now().isoformat())
+    assert fs.ended_sessions == ["1", "3"]
+    assert fs.ended_users == []
+
+
+def test_logout_terminates_user(senv):
+    agent, bus, tk, clock, fs = senv
+    agent.tick()
+    action(bus, "logout", clock.now().isoformat())
+    assert fs.ended_users == [USER]
+
+
+def test_old_action_ignored(senv):
+    agent, bus, tk, clock, fs = senv
+    agent.tick()
+    action(bus, "logout", (clock.now() - timedelta(minutes=3)).isoformat())
+    action(bus, "logout", (clock.now() + timedelta(minutes=3)).isoformat())
+    assert fs.ended_users == []
+
+
+def test_action_for_unknown_user_ignored_and_not_parked(senv):
+    agent, bus, tk, clock, fs = senv
+    agent.tick()
+    action(bus, "logout", clock.now().isoformat(), kid="kid-b")
+    tk.user_list = [USER, "kid-b"]
+    agent.tick()
+    assert fs.ended_users == []
+
+
+def test_malformed_action_ignored(senv):
+    agent, bus, tk, clock, fs = senv
+    agent.tick()
+    bus.publish(topics.action(KID), "garbage")
+    bus.publish(topics.action(KID), Action(op="logout", ts="yesterday").to_json())
+    assert fs.ended_users == []
+
+
+def test_retained_action_handled_per_message_and_agent_never_publishes_action(senv):
+    agent, bus, tk, clock, fs = senv
+    agent.tick()
+    action(bus, "logout", clock.now().isoformat(), retain=True)
+    assert fs.ended_users == [USER]
+    agent.tick()
+    assert fs.ended_users == [USER]
+    assert [t for t, _, _ in bus.published if t == topics.action(KID)] == [topics.action(KID)]  # the test's own
+
+
+def test_action_triggers_republish_next_tick(senv):
+    agent, bus, tk, clock, fs = senv
+    fs.by_user[USER] = [sess("1", locked=True)]
+    agent.tick()
+    action(bus, "end_inactive", clock.now().isoformat())
+    agent.tick()
+    assert published_sessions(bus) == [Sessions(1, 1), Sessions(1, 1)]
