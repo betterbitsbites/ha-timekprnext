@@ -36,7 +36,7 @@ Without an ACL every MQTT user may read and write every topic (the add-on's defa
    - `db_path`: keep `/data/tk-budget.db` (statistics live there and are kept with add-on backups)
    - `familylink`: optional, kids with a Google Family Link sensor (see below)
    - `broker_host` / `broker_port` / `broker_user` / `broker_password`: leave empty; only to use a broker other than the Mosquitto add-on
-3. Start it. The log shows `using MQTT broker core-mosquitto:1883 as addons`. Once the PCs report, per user a device "Screen time <user>" appears with: the limit numbers and switches below, Remaining total, Remaining this week / today, Week left / Today left (percent), Total time today, +15 min, −15 min, Time-up action.
+3. Start it. The log shows `using MQTT broker core-mosquitto:1883 as addons`. Once the PCs report, per user a device "Screen time <user>" appears with: the limit numbers and switches below, Remaining total, Remaining this week / today, Week left / Today left (percent), Total time today, +15 min, −15 min, Time-up action, plus the play, session and button entities described below.
 4. For each kid: set a limit and turn on its switch.
 
 ### Limits
@@ -50,6 +50,28 @@ Each limit is a number plus a switch; a limit applies only while its switch is o
 | Daily, PC + phone (Family Link kids only) | Daily combined limit | Combined limit active |
 
 Per limit there is a sensor "Remaining this week / today / combined" (minutes) and a percent sensor "Week left / Today left / Combined left" (state: percent of that limit left, unknown while the limit is off; attributes `remaining_min` and `limit_min`). The +15 / −15 min buttons add to this week's and today's allowance only; they do not change the saved limits.
+
+### Play time (optional)
+
+A separate play budget per kid: weekly and daily play limits, each with its own number and switch (default off), plus "Play +15 / −15 min" buttons, "Play time today", "Remaining play" and the percent sensors "Play week left / Play today left". Play is capped by the total: the effective remaining play time is never more than "Remaining total".
+
+- **PlayTime must be enabled in timekpr** for the kid, with activity masks (process names) for the games or launchers. Do not rely on the `PLAYTIME_ENABLED` flag in `timekpra --getuserinfo`; it can be stale.
+- **Play counts only while a matching process runs.** A running Steam client counts as play if a mask matches it. Locked screen time counts for neither total nor play (timekpr's `TRACK_INACTIVE` off).
+- **timekpr's own limits must not bind**, because the lower limit always wins: HA governs. Set timekpr's weekly and daily time limits and its PlayTime daily limit high, for example `sudo timekpra --setlimitweek <kid-user> 604800` (7 days in seconds), daily limits 24 h, PlayTime daily limit 24 h.
+- The agent writes the remaining play time with `timekpra --setplaytimeleft`. If timekpr does not apply it (for example PlayTime is off), the agent logs one warning.
+
+### Sessions
+
+The sensor "Sessions" shows how many login sessions the kid has across all PCs (only `Class=user` sessions count; the attributes list `locked` and `by_host`). Two buttons act on all PCs of the kid:
+
+- **End inactive sessions** ends sessions that are locked or not the active one.
+- **Log out everywhere** terminates all sessions of the kid (`loginctl terminate-user`).
+
+Agents pick the action up within one report interval (≤ 45 s) and ignore actions older than 2 minutes, so a PC that was offline does not log the kid out later.
+
+### Upgrade to add-on 0.5.0 / agent 0.2.0
+
+Rebuild and install the package on every PC (`makepkg -si`, tk-agent 0.2.0) and update the add-on to 0.5.0. Old agents keep working; they just report no play time and no sessions.
 
 ### Phone time from Google Family Link (optional)
 
@@ -81,7 +103,7 @@ journalctl -u tk-agent -f
 
 Entity ids for kid `kid-a` (`-` becomes `_`). tk-budget ≥ 0.3.1 sets them via `default_entity_id`; HA applies that only when it first creates an entity. Devices created by 0.3.0 got ids like `sensor.screen_time_kid_a_remaining_total`: delete the device in HA and restart tk-budget to get the ids below (budget and settings are kept in tk-budget).
 
-The card below is one whole card element. The three tiles show the percent left per limit with a bar (tile feature `bar-gauge`) and the remaining minutes as secondary text; the combined and phone rows exist only for kids with a Family Link mapping, remove them otherwise.
+The card below is one whole card element. The five tiles show the percent left per limit (week, today, combined, play week, play today) with a bar (tile feature `bar-gauge`) and the remaining minutes as secondary text; the combined and phone rows exist only for kids with a Family Link mapping, remove them otherwise.
 
 ```yaml
 type: vertical-stack
@@ -109,6 +131,26 @@ cards:
   - type: tile
     entity: sensor.tk_kid_a_combined_left_pct
     name: PC + phone (min left)
+    state_content:
+      - state
+      - remaining_min
+    features:
+      - type: bar-gauge
+        min: 0
+        max: 100
+  - type: tile
+    entity: sensor.tk_kid_a_play_week_left_pct
+    name: Play week (min left)
+    state_content:
+      - state
+      - remaining_min
+    features:
+      - type: bar-gauge
+        min: 0
+        max: 100
+  - type: tile
+    entity: sensor.tk_kid_a_play_today_left_pct
+    name: Play today (min left)
     state_content:
       - state
       - remaining_min
@@ -145,6 +187,36 @@ cards:
           - entity: button.tk_kid_a_adjust_minus_15
             name: −15 min
             icon: mdi:minus-circle
+      - entity: sensor.tk_kid_a_play_today
+        name: Play today
+      - entity: sensor.tk_kid_a_remaining_play
+        name: Remaining play
+      - entity: switch.tk_kid_a_play_limit_active
+        name: Weekly play limit active
+      - entity: number.tk_kid_a_weekly_play_budget
+        name: Weekly play limit
+      - entity: switch.tk_kid_a_daily_play_active
+        name: Daily play limit active
+      - entity: number.tk_kid_a_daily_play_limit
+        name: Daily play limit
+      - type: buttons
+        entities:
+          - entity: button.tk_kid_a_play_plus_15
+            name: Play +15 min
+            icon: mdi:plus-circle
+          - entity: button.tk_kid_a_play_minus_15
+            name: Play −15 min
+            icon: mdi:minus-circle
+      - entity: sensor.tk_kid_a_sessions
+        name: Sessions
+      - type: buttons
+        entities:
+          - entity: button.tk_kid_a_end_inactive_sessions
+            name: End inactive sessions
+            icon: mdi:account-lock
+          - entity: button.tk_kid_a_logout
+            name: Log out everywhere
+            icon: mdi:logout
       - entity: select.tk_kid_a_time_up_action
         name: When time is up
 ```
