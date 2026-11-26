@@ -19,6 +19,7 @@ from tk_protocol.clock import SystemClock
 
 from . import discovery
 from .familylink import Fetch, PhonePoller
+from .links import LinkServer
 from .service import BudgetService
 from .store import Store
 
@@ -44,6 +45,7 @@ def load_options(path: str) -> dict:
         "broker_password": _blank_to_none(opts.get("broker_password")),
         "db_path": opts.get("db_path") or "/data/tk-budget.db",
         "familylink": _load_familylink(opts.get("familylink")),
+        "link_port": int(opts.get("link_port") or 8099),
     }
 
 
@@ -100,6 +102,7 @@ def main() -> None:
     service = BudgetService(bus, store, SystemClock(), phone_kids=phone.keys())
     poller = PhonePoller(phone, os.environ, _urllib_fetch)
     service.start()
+    LinkServer(service.connect_url, opts["link_port"]).start()
     log.info("tk-budget running; known kids: %s", ", ".join(store.kids()) or "none yet")
     log.info("Family Link kids: %s", ", ".join(phone) or "none")
     while True:

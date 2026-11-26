@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -9,7 +9,7 @@ from tk_budget.store import Store
 from tk_protocol import topics
 from tk_protocol.bus import InMemoryBus
 from tk_protocol.clock import FixedClock
-from tk_protocol.payloads import Action, Cmd, Remaining, Sessions, Settings, Usage
+from tk_protocol.payloads import Action, Applied, Cmd, Remaining, Sessions, Settings, Usage
 
 KID = "kid-a"
 MONDAY = datetime(2026, 11, 16, 10, 0)
@@ -69,7 +69,7 @@ def test_adjust_cmd_changes_remaining_and_resets_next_week(env):
     assert remaining(bus).total_s == 36000 + 900
     clock.set(datetime(2026, 11, 23, 0, 0, 30))
     svc.tick()
-    assert remaining(bus) == Remaining(week="2026-W48", total_s=36000)
+    assert remaining(bus) == Remaining(week="2026-W48", total_s=36000, rev=1)
 
 
 def test_negative_adjust_clamps_at_zero(env):
@@ -136,9 +136,9 @@ def test_time_up_action_select_publishes_settings(env):
     bus, store, *_ = env
     assert Settings.from_json(bus.retained[topics.settings(KID)]).time_up_action == "lock"
     bus.publish(discovery.set_topic(KID, "time_up_action"), "shutdown")
-    assert Settings.from_json(bus.retained[topics.settings(KID)]) == Settings(time_up_action="shutdown")
+    assert Settings.from_json(bus.retained[topics.settings(KID)]) == Settings(time_up_action="shutdown", rev=1)
     bus.publish(discovery.set_topic(KID, "time_up_action"), "explode")
-    assert Settings.from_json(bus.retained[topics.settings(KID)]) == Settings(time_up_action="shutdown")
+    assert Settings.from_json(bus.retained[topics.settings(KID)]) == Settings(time_up_action="shutdown", rev=1)
 
 
 def test_limit_on_without_budget_is_zero(tmp_path):
@@ -147,7 +147,7 @@ def test_limit_on_without_budget_is_zero(tmp_path):
     BudgetService(bus, store, FixedClock(MONDAY)).start()
     report(bus, "pc1", 60, kid="kid-b")
     bus.publish(discovery.set_topic("kid-b", "limit_active"), "ON")
-    assert remaining(bus, "kid-b") == Remaining(week="2026-W47", total_s=0, limited=True)
+    assert remaining(bus, "kid-b") == Remaining(week="2026-W47", total_s=0, limited=True, rev=1)
 
 
 def test_kid_learned_from_usage_and_persisted(env):
@@ -182,12 +182,12 @@ def test_cmd_and_set_for_unknown_kid_do_not_create_it(env):
 def test_limit_off_means_unlimited(env):
     bus, store, *_ = env
     bus.publish(discovery.set_topic(KID, "limit_active"), "OFF")
-    assert remaining(bus) == Remaining(week="2026-W47", total_s=0, limited=False)
+    assert remaining(bus) == Remaining(week="2026-W47", total_s=0, limited=False, rev=1)
     report(bus, "pc1", 600, day_s=600)
     state = json.loads(bus.retained[discovery.state_topic(KID)])
     assert state["today_s"] == 600 and state["limited"] is False
     bus.publish(discovery.set_topic(KID, "limit_active"), "ON")
-    assert remaining(bus) == Remaining(week="2026-W47", total_s=36000 - 600, limited=True)
+    assert remaining(bus) == Remaining(week="2026-W47", total_s=36000 - 600, limited=True, rev=2)
 
 
 def test_limit_active_rejects_other_payloads(env):
@@ -206,7 +206,7 @@ def test_discovery_published_retained_on_start(env):
 def test_discovery_has_all_entities():
     ents = discovery.entities(KID)
     by_id = {p["unique_id"]: (t, p) for t, p in ents}
-    assert len(ents) == 26
+    assert len(ents) == 28
     expected = {
         "tk_kid-a_daily_total_limit": "number",
         "tk_kid-a_daily_limit_active": "switch",
@@ -234,6 +234,8 @@ def test_discovery_has_all_entities():
         "tk_kid-a_play_today_left_pct": "sensor",
         "tk_kid-a_play_plus_15": "button",
         "tk_kid-a_play_minus_15": "button",
+        "tk_kid-a_applying": "binary_sensor",
+        "tk_kid-a_presence": "sensor",
     }
     for uid, component in expected.items():
         topic, payload = by_id[uid]
@@ -301,7 +303,7 @@ def test_daily_only_kid_is_limited(env):
     bus, *_ = env
     bus.publish(discovery.set_topic(KID, "limit_active"), "OFF")
     set_daily(bus, 30)
-    assert remaining(bus) == Remaining(week="2026-W47", total_s=1800, limited=True)
+    assert remaining(bus) == Remaining(week="2026-W47", total_s=1800, limited=True, rev=3)
     st = state(bus)
     assert st["week_limited"] is False and st["limited"] is True and st["daily_limited"] is True
 
@@ -701,3 +703,198 @@ def test_play_entities():
         assert "none" in p["json_attributes_template"]
     assert Cmd.from_json(by_id["tk_kid-a_play_plus_15"]["payload_press"]) == Cmd(op="adjust_play", minutes=15)
     assert Cmd.from_json(by_id["tk_kid-a_play_minus_15"]["payload_press"]) == Cmd(op="adjust_play", minutes=-15)
+
+
+# --- revisions, apply feedback and presence -------------------------------------
+
+def presence(bus, host, count=1, locked=0, st="active", kind="wayland", connect="", kid=KID):
+    s = Sessions(count, locked, state=st, kind=kind, connect=connect)
+    bus.publish(topics.sessions(host, kid), s.to_json(), retain=True)
+
+
+def ack(bus, host, rev, kid=KID):
+    bus.publish(topics.applied(host, kid), Applied(rev=rev).to_json(), retain=True)
+
+
+def test_rev_increments_on_accepted_input_only(env):
+    bus, store, *_ = env
+    assert remaining(bus).rev == 0 and state(bus)["rev"] == 0
+    bus.publish(discovery.set_topic(KID, "weekly_total_min"), "300")
+    assert remaining(bus).rev == 1 and store.get_setting(KID, "rev") == "1"
+    bus.publish(discovery.set_topic(KID, "limit_active"), "maybe")  # rejected
+    assert remaining(bus).rev == 1
+    bus.publish(discovery.set_topic(KID, "unknown_key"), "1")
+    assert remaining(bus).rev == 1
+    bus.publish(topics.cmd(KID), Cmd(op="adjust_total", minutes=15).to_json())
+    assert remaining(bus).rev == 2
+    bus.publish(topics.cmd(KID), Cmd(op="adjust_play", minutes=15).to_json())
+    assert remaining(bus).rev == 3
+    report(bus, "pc1", 600)
+    bus.publish(topics.cmd(KID), Cmd(op="logout").to_json())
+    bus.publish(topics.cmd(KID), Cmd(op="end_inactive").to_json())
+    presence(bus, "pc1")
+    ack(bus, "pc1", 3)
+    assert remaining(bus).rev == 3 and state(bus)["rev"] == 3
+    bus.publish(discovery.set_topic(KID, "weekly_total_min"), "300")  # same value: still parent input
+    assert remaining(bus).rev == 4
+
+
+def test_settings_carry_rev(env):
+    bus, store, *_ = env
+    bus.publish(discovery.set_topic(KID, "daily_total_min"), "60")
+    bus.publish(discovery.set_topic(KID, "time_up_action"), "suspend")
+    assert Settings.from_json(bus.retained[topics.settings(KID)]) == Settings(time_up_action="suspend", rev=2)
+    assert remaining(bus).rev == 2
+
+
+def test_rev_survives_restart(env):
+    bus, store, clock, _ = env
+    bus.publish(discovery.set_topic(KID, "weekly_total_min"), "300")
+    bus2 = InMemoryBus()
+    BudgetService(bus2, store, clock).start()
+    assert remaining(bus2).rev == 1
+    assert Settings.from_json(bus2.retained[topics.settings(KID)]).rev == 1
+
+
+def test_applying_until_session_host_acks(env):
+    bus, store, *_ = env
+    report(bus, "pc1", 60)
+    presence(bus, "pc1")
+    bus.publish(discovery.set_topic(KID, "weekly_total_min"), "300")
+    ack(bus, "pc1", 1)
+    assert state(bus)["applying"] is False
+    bus.publish(discovery.set_topic(KID, "weekly_total_min"), "200")
+    assert state(bus)["applying"] is True
+    ack(bus, "pc1", 2)
+    assert state(bus)["applying"] is False
+
+
+def test_applying_off_when_host_goes_offline(env):
+    bus, *_ = env
+    report(bus, "pc1", 60)
+    presence(bus, "pc1")
+    ack(bus, "pc1", 0)
+    bus.publish(discovery.set_topic(KID, "weekly_total_min"), "200")
+    assert state(bus)["applying"] is True
+    bus.publish("timekpr/pc1/status", "offline", retain=True)
+    assert state(bus)["applying"] is False
+
+
+def test_applying_off_when_kid_logs_out(env):
+    bus, *_ = env
+    report(bus, "pc1", 60)
+    presence(bus, "pc1")
+    ack(bus, "pc1", 0)
+    bus.publish(discovery.set_topic(KID, "weekly_total_min"), "200")
+    assert state(bus)["applying"] is True
+    presence(bus, "pc1", count=0, st="none", kind="none")
+    assert state(bus)["applying"] is False
+
+
+def test_host_that_never_acked_is_not_waited_for(env):
+    bus, *_ = env
+    report(bus, "pc1", 60)
+    presence(bus, "pc1")  # old agent: no acks
+    bus.publish(discovery.set_topic(KID, "weekly_total_min"), "200")
+    assert state(bus)["applying"] is False
+
+
+def test_applying_times_out_via_tick(env, caplog):
+    bus, store, clock, svc = env
+    report(bus, "pc1", 60)
+    presence(bus, "pc1")
+    ack(bus, "pc1", 0)
+    bus.publish(discovery.set_topic(KID, "weekly_total_min"), "200")
+    clock.set(MONDAY + timedelta(seconds=119))
+    svc.tick()
+    assert state(bus)["applying"] is True
+    caplog.set_level("INFO", logger="tk_budget.service")
+    clock.set(MONDAY + timedelta(seconds=121))
+    svc.tick()
+    assert state(bus)["applying"] is False
+    svc.tick()
+    late = [r for r in caplog.records if "pc1" in r.getMessage() and "applied" in r.getMessage()]
+    assert len(late) == 1
+
+
+def test_no_applying_after_restart(env):
+    bus, store, clock, _ = env
+    report(bus, "pc1", 60)
+    presence(bus, "pc1")
+    ack(bus, "pc1", 0)
+    bus.publish(discovery.set_topic(KID, "weekly_total_min"), "200")
+    assert state(bus)["applying"] is True
+    bus2 = InMemoryBus()
+    bus2.retained.update(bus.retained)
+    BudgetService(bus2, store, clock).start()
+    assert state(bus2)["applying"] is False
+
+
+def test_where_and_presence_for_two_hosts(env):
+    bus, *_ = env
+    report(bus, "pc1", 60)
+    presence(bus, "pc2", locked=1, st="locked", kind="x11", connect="vnc://pc2.lan:5900")
+    presence(bus, "pc1", st="active", kind="wayland", connect="rdp://full%20address=s:pc1.lan")
+    presence(bus, "pc3", count=0, st="none", kind="none")
+    st = state(bus)
+    assert st["where"] == [
+        {"host": "pc1", "state": "active", "kind": "wayland", "connect": "rdp://full%20address=s:pc1.lan",
+         "link": "/connect/kid-a/pc1"},
+        {"host": "pc2", "state": "locked", "kind": "x11", "connect": "vnc://pc2.lan:5900",
+         "link": "/connect/kid-a/pc2"},
+    ]
+    assert st["presence"] == "pc1: active (Wayland) · pc2: locked (X11)"
+
+
+def test_presence_without_connect_and_text_session(env):
+    bus, *_ = env
+    report(bus, "pc1", 60)
+    presence(bus, "pc1", st="away", kind="tty")
+    st = state(bus)
+    assert st["where"][0]["link"] == "" and st["where"][0]["connect"] == ""
+    assert st["presence"] == "pc1: away (Text)"
+
+
+def test_presence_not_logged_in(env):
+    bus, *_ = env
+    assert state(bus)["where"] == [] and state(bus)["presence"] == "not logged in"
+    report(bus, "pc1", 60)
+    presence(bus, "pc1", connect="vnc://pc1.lan")
+    bus.publish("timekpr/pc1/status", "offline", retain=True)
+    assert state(bus)["where"] == [] and state(bus)["presence"] == "not logged in"
+
+
+def test_connect_url(env):
+    bus, store, clock, svc = env
+    report(bus, "pc1", 60)
+    presence(bus, "pc1", connect="vnc://pc1.lan:5900")
+    presence(bus, "pc2", count=0, st="none", kind="none", connect="vnc://pc2.lan")
+    assert svc.connect_url(KID, "pc1") == "vnc://pc1.lan:5900"
+    assert svc.connect_url(KID, "pc2") is None
+    assert svc.connect_url(KID, "nope") is None
+    assert svc.connect_url("kid-z", "pc1") is None
+    bus.publish("timekpr/pc1/status", "offline", retain=True)
+    assert svc.connect_url(KID, "pc1") is None
+
+
+def test_malformed_ack_ignored(env):
+    bus, *_ = env
+    report(bus, "pc1", 60)
+    presence(bus, "pc1")
+    bus.publish(topics.applied("pc1", KID), "garbage", retain=True)
+    bus.publish(discovery.set_topic(KID, "weekly_total_min"), "200")
+    assert state(bus)["applying"] is False
+
+
+def test_presence_entities():
+    by_id = {p["unique_id"]: (t, p) for t, p in discovery.entities(KID)}
+    t, a = by_id["tk_kid-a_applying"]
+    assert t == "homeassistant/binary_sensor/tk_kid-a/applying/config"
+    assert a["name"] == "Applying" and a["icon"] == "mdi:timer-sand"
+    assert (a["payload_on"], a["payload_off"]) == ("ON", "OFF")
+    assert "value_json.applying" in a["value_template"]
+    assert a["state_topic"] == discovery.state_topic(KID)
+    _, p = by_id["tk_kid-a_presence"]
+    assert "value_json.presence" in p["value_template"] and "255" in p["value_template"]
+    assert p["json_attributes_topic"] == discovery.state_topic(KID)
+    assert "where" in p["json_attributes_template"]

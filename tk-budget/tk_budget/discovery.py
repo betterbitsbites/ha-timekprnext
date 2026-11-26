@@ -178,6 +178,18 @@ def entities(kid: str) -> list[tuple[str, dict]]:
                                        " 'by_host': value_json.sessions_by_host} | tojson }}"))
     out.append((_topic("sensor", kid, "sessions"), p))
 
+    p = _base(kid, "binary_sensor", "applying", "Applying")
+    p.update(state_topic=st, payload_on="ON", payload_off="OFF", icon="mdi:timer-sand",
+             value_template="{{ 'ON' if value_json.applying else 'OFF' }}")
+    out.append((_topic("binary_sensor", kid, "applying"), p))
+
+    p = _base(kid, "sensor", "presence", "Presence")
+    p.update(state_topic=st, icon="mdi:monitor-account",
+             value_template="{{ value_json.presence[:255] }}",  # HA rejects states over 255 chars
+             json_attributes_topic=st,
+             json_attributes_template="{{ {'where': value_json.where} | tojson }}")
+    out.append((_topic("sensor", kid, "presence"), p))
+
     for obj, name, op, icon in (("end_inactive_sessions", "End inactive sessions", "end_inactive",
                                  "mdi:account-lock"),
                                 ("logout", "Log out everywhere", "logout", "mdi:logout")):

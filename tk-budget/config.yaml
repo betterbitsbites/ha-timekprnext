@@ -1,5 +1,5 @@
 name: tk-budget
-version: "0.5.0"
+version: "0.6.0"
 slug: tk_budget
 description: Shared weekly screen-time budget for Timekpr-nExT clients
 url: https://github.com/<owner>/ha-timekprnext
@@ -16,11 +16,19 @@ services:
 # Kids are not configured: every timekpr user reported by a PC appears automatically.
 # Core API proxy, to read the Google Family Link sensors.
 homeassistant_api: true
+# Dashboard links http://<ha-host>:8099/connect/<kid>/<host> redirect to the PC's rdp:// or vnc:// URL.
+ports:
+  "8099/tcp": 8099
+ports_description:
+  "8099/tcp": Remote-connect redirect links for the dashboard
 options:
   db_path: /data/tk-budget.db
   familylink: []
+  link_port: 8099
 schema:
   db_path: str
+  # Port the redirect server listens on inside the add-on (keep it in line with `ports`)
+  link_port: port
   # Kids with a Google Family Link sensor (phone time), e.g. kid: kid-a, entity: sensor.<child>_daily_screen_time
   familylink:
     - kid: str

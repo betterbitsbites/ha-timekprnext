@@ -16,13 +16,17 @@ from datetime import timedelta
 from tk_protocol import topics
 from tk_protocol.bus import Bus
 from tk_protocol.clock import Clock
-from tk_protocol.payloads import Action, Cmd, Remaining, Sessions, Settings, Usage
+from tk_protocol.payloads import Action, Applied, Cmd, Remaining, Sessions, Settings, Usage
 
 from . import discovery
 from .engine import UsageLedger, effective, limit, week_key
 from .store import Store
 
 log = logging.getLogger(__name__)
+
+APPLY_TIMEOUT_S = 120  # after this long without an ack, `applying` goes off
+REV_KEY = "rev"  # setting: per-kid revision of parent input
+_KIND_LABELS = {"wayland": "Wayland", "x11": "X11", "tty": "Text"}
 
 
 def _locked(fn):
@@ -46,6 +50,9 @@ class BudgetService:
         self._sessions: dict[tuple[str, str], Sessions] = {}  # (host, kid) -> latest report
         self._offline: set[str] = set()  # hosts whose last status is "offline": their reports count 0
         self._last: dict[str, tuple[str, str]] = {}  # kid -> (remaining json, state json)
+        self._acked: dict[tuple[str, str], int] = {}  # (host, kid) -> last rev the agent applied
+        self._rev_at: dict[str, float] = {}  # kid -> clock time of the last rev bump (in memory)
+        self._late_logged: dict[str, int] = {}  # kid -> rev whose late hosts were logged
         self._lock = threading.RLock()
 
     @_locked
@@ -60,6 +67,7 @@ class BudgetService:
         self._bus.subscribe(f"{topics.PREFIX}/+/+/usage", self._on_usage)
         self._bus.subscribe(f"{topics.PREFIX}/+/+/sessions", self._on_sessions)
         self._bus.subscribe(f"{topics.PREFIX}/+/status", self._on_status)
+        self._bus.subscribe(f"{topics.PREFIX}/+/+/applied", self._on_applied)
         self._bus.subscribe(topics.cmd("+"), self._on_cmd, retained=False)  # a button press, never a replay
         self._bus.subscribe(discovery.set_topic("+", "+"), self._on_set)
         self._bus.on_connect(self._on_reconnect)
@@ -190,6 +198,7 @@ class BudgetService:
             ts = self._clock.now().isoformat(timespec="seconds")
             self._bus.publish(topics.action(kid), Action(op=c.op, ts=ts).to_json(), retain=False)
             return
+        self._bump_rev(kid)
         self._publish(kid, force=False)
 
     @_locked
@@ -211,7 +220,6 @@ class BudgetService:
                 log.warning("ignoring time_up_action %r", payload)
                 return
             self._store.set_setting(kid, key, payload)
-            self._publish_settings(kid)
         elif key == "daily_total_min":
             try:
                 minutes = int(float(payload))
@@ -245,7 +253,33 @@ class BudgetService:
             self._store.set_setting(kid, key, payload)
         else:
             return
+        self._bump_rev(kid)  # every accepted input, even an unchanged value: agents apply at once
+        if key == "time_up_action":
+            self._publish_settings(kid)
         self._publish(kid, force=False)
+
+    @_locked
+    def _on_applied(self, topic: str, payload: str) -> None:
+        parsed = topics.parse_applied_topic(topic)
+        if parsed is None:
+            return
+        host, kid = parsed
+        if kid not in self._kids:
+            return
+        try:
+            self._acked[(host, kid)] = Applied.from_json(payload).rev
+        except ValueError as e:
+            log.warning("ignoring malformed ack on %s: %s", topic, e)
+            return
+        self._publish(kid, force=False)
+
+    @_locked
+    def connect_url(self, kid: str, host: str) -> str | None:
+        """Remote-connect URL the agent published for a logged-in kid on an online host, else None."""
+        s = self._sessions.get((host, kid))
+        if s is None or host in self._offline or s.count == 0 or not s.connect:
+            return None
+        return s.connect
 
     # --- publishing -----------------------------------------------------------
 
@@ -262,8 +296,46 @@ class BudgetService:
     def _time_up_action(self, kid: str) -> str:
         return self._store.get_setting(kid, "time_up_action") or discovery.DEFAULT_TIME_UP_ACTION
 
+    def _rev(self, kid: str) -> int:
+        return int(self._store.get_setting(kid, REV_KEY, "0") or 0)
+
+    def _bump_rev(self, kid: str) -> None:
+        self._store.set_setting(kid, REV_KEY, str(self._rev(kid) + 1))
+        self._rev_at[kid] = self._clock.now().timestamp()
+
+    def _applying(self, kid: str, rev: int, live: dict[str, Sessions]) -> bool:
+        """Some online host with the kid logged in has acked, but not yet this rev (within the timeout).
+        Hosts that never acked (old agents) are not waited for."""
+        late = sorted(h for h, s in live.items()
+                      if s.count > 0 and (h, kid) in self._acked and self._acked[(h, kid)] < rev)
+        if not late or kid not in self._rev_at:
+            return False
+        if self._clock.now().timestamp() - self._rev_at[kid] < APPLY_TIMEOUT_S:
+            return True
+        if self._late_logged.get(kid) != rev:
+            self._late_logged[kid] = rev
+            log.info("%s: rev %d not applied within %d s on %s", kid, rev, APPLY_TIMEOUT_S, ", ".join(late))
+        return False
+
+    @staticmethod
+    def _where(kid: str, live: dict[str, Sessions]) -> list[dict]:
+        return [{"host": h, "state": s.state, "kind": s.kind, "connect": s.connect,
+                 "link": f"/connect/{kid}/{h}" if s.connect else ""}
+                for h, s in sorted(live.items()) if s.count > 0]
+
+    @staticmethod
+    def _presence(where: list[dict]) -> str:
+        """E.g. "pc1: active (Wayland) · pc2: locked (X11)"; old agents report no state or kind."""
+        parts = []
+        for w in where:
+            text = f"{w['host']}: {w['state'] if w['state'] != 'none' else 'logged in'}"
+            if w["kind"] in _KIND_LABELS:
+                text += f" ({_KIND_LABELS[w['kind']]})"
+            parts.append(text)
+        return " · ".join(parts) or "not logged in"
+
     def _publish_settings(self, kid: str) -> None:
-        s = Settings(time_up_action=self._time_up_action(kid))
+        s = Settings(time_up_action=self._time_up_action(kid), rev=self._rev(kid))
         self._bus.publish(topics.settings(kid), s.to_json(), retain=True)
 
     def _publish(self, kid: str, force: bool) -> None:
@@ -300,11 +372,17 @@ class BudgetService:
         if play_limited and limited:
             play_rem = min(play_rem, eff)
         play_s = play_rem if play_limited else 0
+        rev = self._rev(kid)
         rem_json = Remaining(week=week, total_s=eff if limited else 0, limited=limited,
-                         play_s=play_s, play_limited=play_limited).to_json()
+                             play_s=play_s, play_limited=play_limited, rev=rev).to_json()
         live = {h: v for (h, k), v in sorted(self._sessions.items()) if k == kid and h not in self._offline}
         by_host = {h: v.count for h, v in live.items() if v.count > 0}
+        where = self._where(kid, live)
         state_json = json.dumps({
+            "rev": rev,
+            "applying": self._applying(kid, rev, live),
+            "where": where,
+            "presence": self._presence(where),
             "sessions": sum(by_host.values()),
             "sessions_locked": sum(v.locked for v in live.values()),
             "sessions_by_host": by_host,

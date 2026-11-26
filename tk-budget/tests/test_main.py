@@ -82,3 +82,19 @@ def test_familylink_option_mapped_and_filtered(tmp_path):
     assert load_options(str(p))["familylink"] == {"kid-a": "sensor.x"}
     p.write_text(json.dumps({}))
     assert load_options(str(p))["familylink"] == {}
+
+
+def test_link_port_option(tmp_path):
+    p = tmp_path / "options.json"
+    p.write_text(json.dumps({}))
+    assert load_options(str(p))["link_port"] == 8099
+    p.write_text(json.dumps({"link_port": 8123}))
+    assert load_options(str(p))["link_port"] == 8123
+
+
+def test_config_yaml_maps_link_port():
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[1] / "config.yaml").read_text()
+    assert 'version: "0.6.0"' in text
+    assert "link_port: 8099" in text and "link_port: port" in text
+    assert '"8099/tcp": 8099' in text and "ports_description:" in text
