@@ -84,9 +84,9 @@ Agents run an action as soon as the message arrives; only the session count refr
 
 ### Presence and remote links
 
-The sensor "Presence" says where the kid is logged in, e.g. `pc1: active (Wayland) · pc2: locked (X11)` (or `not logged in`). Its attribute `where` is a list with one entry per PC where the kid has a session: `host`, `state` (`active`, `locked`, ...; `none` from old agents), `kind` (`wayland`, `x11` or empty), `connect` (the remote-desktop URL) and `link` (`/connect/<kid>/<host>`, empty without a URL). The example card below shows it with a connect link per PC.
+The sensor "Presence" says where the kid is logged in, e.g. `pc1: active (Wayland) · pc2: locked (X11)` (or `not logged in`). Its attribute `where` is a list with one entry per PC where the kid has a session: `host`, `state` (`active`, `locked`, ...; `none` from old agents), `kind` (`wayland`, `x11`, `tty`; `none` from old agents), `connect` (the remote-desktop URL) and `link` (`/connect/<kid>/<host>`, empty without a URL). The example card below shows it with a connect link per PC.
 
-- **The agent reports the connect URL** from `[remote]` in `/etc/tk-agent.conf`: Wayland sessions get `rdp://<kid>@<host>:<rdp_port>`, X11 sessions `vnc://<host>:<vnc_base_port + display number>` (display `:1` is port 5901 with the default base 5900). `host` defaults to the PC's host name; set a name or IP your PC can reach. Defaults: `rdp_port = 3389`, `vnc_base_port = 5900`.
+- **The agent reports the connect URL** from `[remote]` in `/etc/tk-agent.conf`: Wayland sessions get `rdp://<kid>@<host>:<rdp_port>`, X11 sessions `vnc://<host>:<vnc_base_port + display number>` (display `:1` is port 5901 with the default base 5900). `host` defaults to the PC's host name; set a host name or an IPv4 address (not IPv6) your PC can reach. Defaults: `rdp_port = 3389`, `vnc_base_port = 5900`.
 - **The PC must offer the service.** For Wayland (Plasma) `krdp` has to be set up in the kid's own Plasma session; for X11 a VNC server per display (display number + base port). The agent only reports the URL, it does not install or start anything.
 - **Your Linux desktop needs a handler for `rdp://` and `vnc://`**: KRDC or Remmina.
 - **Why a redirect?** HA's markdown card drops `rdp://` and `vnc://` links, so the card links to `http://<ha-host>:8099/connect/<kid>/<host>` and tk-budget answers with a 302 to the current connect URL. The add-on option `link_port` stays at 8099; to use another port on the HA host, change the host-side port in the add-on's Network settings.
@@ -94,11 +94,12 @@ The sensor "Presence" says where the kid is logged in, e.g. `pc1: active (Waylan
 
 ### Apply feedback (hourglass)
 
-After you change a limit or the time-up action, the agent wakes at once and applies it (no waiting for the next 45 s interval), then acknowledges the settings revision it applied. The binary sensor "Applying" is on until every PC that matters has acknowledged:
+After you change anything as a parent (limits, switches, the time-up action, the ±15 min buttons; each input bumps the revision), the agent wakes at once and applies it (no waiting for the next 45 s interval), then acknowledges the revision it applied. The binary sensor "Applying" is on until every PC that matters has acknowledged:
 
 - It waits only for PCs that are online, where the kid is logged in, and whose agent has acknowledged before (agent 0.3.0 or later). PCs with an older agent, PCs without a session and offline PCs are not waited for.
 - At most 120 s after the change (in practice up to about 150 s, as the check runs every 30 s); then it goes off and the add-on log says on which PCs the revision was not applied.
-- Right after the first change without any acknowledgement it stays off. The example card shows an hourglass while it is on.
+- It works from the first change on, once a PC with agent 0.3.0 has received a remaining value and the kid is logged in there. A PC where the kid only has a text or ssh session that timekpr does not track may not acknowledge; the hourglass then ends after the 120 s timeout.
+- The example card shows an hourglass while it is on.
 
 ### Upgrade to add-on 0.6.0 / agent 0.3.0
 
@@ -156,10 +157,11 @@ cards:
   - type: markdown
     content: >-
       {% set w = state_attr('sensor.tk_kid_a_presence', 'where') or [] %}
+      {% set kinds = {'wayland': 'Wayland', 'x11': 'X11', 'tty': 'Text'} %}
 
       {% if w | count == 0 %}kid-a is not logged in.{% endif %}
 
-      {% for p in w %}**{{ p.host }}**: {{ 'logged in' if p.state == 'none' else p.state }}{% if p.kind %} ({{ p.kind }}){% endif %}{% if p.link %} - [connect](http://<ha-host>:8099{{ p.link }}){% endif %}
+      {% for p in w %}**{{ p.host }}**: {{ 'logged in' if p.state == 'none' else p.state }}{% if p.kind in kinds %} ({{ kinds[p.kind] }}){% endif %}{% if p.link %} - [connect](http://<ha-host>:8099{{ p.link }}){% endif %}
 
       {% endfor %}
   - type: tile
