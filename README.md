@@ -63,11 +63,13 @@ A separate play budget per kid: weekly and daily play limits, each with its own 
   sudo timekpra --settimelimitweek <kid-user> 604800        # weekly limit: 7 days
   sudo timekpra --setalloweddays <kid-user> '1;2;3;4;5;6;7' # all days allowed (check with `timekpra --help`)
   sudo timekpra --settimelimits <kid-user> '86400;86400;86400;86400;86400;86400;86400'          # daily: 24 h per allowed day
+  sudo timekpra --settimelimitmonth <kid-user> 2678400      # monthly limit: 31 days
   sudo timekpra --setplaytimeenabled <kid-user> true
+  sudo timekpra --setplaytimealloweddays <kid-user> '1;2;3;4;5;6;7'  # PlayTime on all days (check with `timekpra --help`)
   sudo timekpra --setplaytimelimits <kid-user> '86400;86400;86400;86400;86400;86400;86400'      # PlayTime daily: 24 h
   ```
 
-  The option names are taken from our timekpr notes and `spike/probe-play.sh`, not from a captured `timekpra --help`; `--setalloweddays` and its value format in particular are unverified, so check them with `timekpra --help`. If a monthly limit is set in timekpr, raise it as well. PlayTime also needs the global switch `TIMEKPR_PLAYTIME_ENABLED = True` in `/etc/timekpr/timekpr.conf` (then `systemctl restart timekpr`).
+  The option names are taken from our timekpr notes and `spike/probe-play.sh`, not from a captured `timekpra --help`; `--setalloweddays` and its value format in particular are unverified, so check them with `timekpra --help`. Allowed hours (`--setallowedhours`) are a separate restriction: HA does not lift them, so only restrict hours there on purpose. PlayTime also needs the global switch `TIMEKPR_PLAYTIME_ENABLED = True` in `/etc/timekpr/timekpr.conf` (then `systemctl restart timekpr`).
 - The agent writes the remaining play time with `timekpra --setplaytimeleft`. If timekpr does not apply it (for example PlayTime is off), the agent logs one warning "PlayTime seems off" and leaves play alone, retrying every 15 minutes, on the next day and when a play limit is switched on or off.
 - **Play limits are verified on real hardware only once** `sudo spike/probe-play.sh write` (test user only) has been run. Until then, watch the agent log (`journalctl -u tk-agent`) for "PlayTime seems off".
 
