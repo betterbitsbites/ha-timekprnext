@@ -1,7 +1,7 @@
 # Builds tk-agent from this repository checkout (hence $startdir, no sources):
 #   cd tk-agent/packaging && makepkg -si
 pkgname=tk-agent
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="Home Assistant shared screen-time budget agent for Timekpr-nExT"
 arch=('any')

@@ -82,6 +82,28 @@ The sensor "Sessions" shows how many login sessions the kid has across all PCs (
 
 Agents run an action as soon as the message arrives; only the session count refreshes on the next report (≤ 45 s). They ignore actions older than 2 minutes, so a PC that was offline does not log the kid out later. This needs the HA host and the PCs within 2 minutes of each other and in the same timezone: keep their clocks synced (NTP).
 
+### Presence and remote links
+
+The sensor "Presence" says where the kid is logged in, e.g. `pc1: active (Wayland) · pc2: locked (X11)` (or `not logged in`). Its attribute `where` is a list with one entry per PC where the kid has a session: `host`, `state` (`active`, `locked`, ...; `none` from old agents), `kind` (`wayland`, `x11` or empty), `connect` (the remote-desktop URL) and `link` (`/connect/<kid>/<host>`, empty without a URL). The example card below shows it with a connect link per PC.
+
+- **The agent reports the connect URL** from `[remote]` in `/etc/tk-agent.conf`: Wayland sessions get `rdp://<kid>@<host>:<rdp_port>`, X11 sessions `vnc://<host>:<vnc_base_port + display number>` (display `:1` is port 5901 with the default base 5900). `host` defaults to the PC's host name; set a name or IP your PC can reach. Defaults: `rdp_port = 3389`, `vnc_base_port = 5900`.
+- **The PC must offer the service.** For Wayland (Plasma) `krdp` has to be set up in the kid's own Plasma session; for X11 a VNC server per display (display number + base port). The agent only reports the URL, it does not install or start anything.
+- **Your Linux desktop needs a handler for `rdp://` and `vnc://`**: KRDC or Remmina.
+- **Why a redirect?** HA's markdown card drops `rdp://` and `vnc://` links, so the card links to `http://<ha-host>:8099/connect/<kid>/<host>` and tk-budget answers with a 302 to the current connect URL. The add-on option `link_port` stays at 8099; to use another port on the HA host, change the host-side port in the add-on's Network settings.
+- **Port 8099 has no authentication and is for the LAN only.** It serves nothing but redirects to `rdp://` and `vnc://` URLs (everything else is a 404); the redirect itself does not log anybody in. If the port cannot be bound, the add-on logs an error ("remote links disabled") and runs on without links.
+
+### Apply feedback (hourglass)
+
+After you change a limit or the time-up action, the agent wakes at once and applies it (no waiting for the next 45 s interval), then acknowledges the settings revision it applied. The binary sensor "Applying" is on until every PC that matters has acknowledged:
+
+- It waits only for PCs that are online, where the kid is logged in, and whose agent has acknowledged before (agent 0.3.0 or later). PCs with an older agent, PCs without a session and offline PCs are not waited for.
+- At most 120 s after the change (in practice up to about 150 s, as the check runs every 30 s); then it goes off and the add-on log says on which PCs the revision was not applied.
+- Right after the first change without any acknowledgement it stays off. The example card shows an hourglass while it is on.
+
+### Upgrade to add-on 0.6.0 / agent 0.3.0
+
+Rebuild and install the package on every PC (`makepkg -si`, tk-agent 0.3.0) and update the add-on to 0.6.0. Presence, remote links and the hourglass need both; with an old agent the sensor "Presence" shows the sessions without state, kind or link and the hourglass does not wait for that PC. Add `[remote]` to `/etc/tk-agent.conf` if the host name is not what your PC can reach (see `packaging/tk-agent.conf.example`). In the add-on's Network settings port 8099 appears after the update.
+
 ### Upgrade to add-on 0.5.0 / agent 0.2.0
 
 Rebuild and install the package on every PC (`makepkg -si`, tk-agent 0.2.0) and update the add-on to 0.5.0. On PCs still running agent 0.1.x the total limits keep working, but **play limits are not enforced** there and no sessions are reported.
@@ -110,17 +132,36 @@ sudo systemctl enable --now tk-agent
 journalctl -u tk-agent -f
 ```
 
-`/etc/tk-agent.conf` is installed with mode 600 (it holds the MQTT password) and kept on upgrades. Kids are the timekpr users: add a kid to timekpr on a PC and it appears in HA after the next report (≤ 45 s).
+`/etc/tk-agent.conf` is installed with mode 600 (it holds the MQTT password) and kept on upgrades. The optional `[remote]` section sets the host and ports of the remote-desktop links (see Presence and remote links). Kids are the timekpr users: add a kid to timekpr on a PC and it appears in HA after the next report (≤ 45 s).
 
 ## Example dashboard card
 
 Entity ids for kid `kid-a` (`-` becomes `_`). tk-budget ≥ 0.3.1 sets them via `default_entity_id`; HA applies that only when it first creates an entity. Devices created by 0.3.0 got ids like `sensor.screen_time_kid_a_remaining_total`: delete the device in HA and restart tk-budget to get the ids below (budget and settings are kept in tk-budget).
 
-The card below is one whole card element. The five tiles show the percent left per limit (week, today, combined, play week, play today) with a bar (tile feature `bar-gauge`) and the remaining minutes as secondary text; the combined and phone rows exist only for kids with a Family Link mapping, remove them otherwise.
+The card below is one whole card element. The five tiles show the percent left per limit (week, today, combined, play week, play today) with a bar (tile feature `bar-gauge`) and the remaining minutes as secondary text; the combined and phone rows exist only for kids with a Family Link mapping, remove them otherwise. At the top a conditional card shows an hourglass while "Applying" is on, and a markdown card lists where the kid is logged in with a connect link per PC (replace `<ha-host>` with your HA host name or IP; the link goes through port 8099, see Presence and remote links).
 
 ```yaml
 type: vertical-stack
 cards:
+  - type: conditional
+    conditions:
+      - condition: state
+        entity: binary_sensor.tk_kid_a_applying
+        state: "on"
+    card:
+      type: tile
+      entity: binary_sensor.tk_kid_a_applying
+      name: Applying
+      icon: mdi:timer-sand
+  - type: markdown
+    content: >-
+      {% set w = state_attr('sensor.tk_kid_a_presence', 'where') or [] %}
+
+      {% if w | count == 0 %}kid-a is not logged in.{% endif %}
+
+      {% for p in w %}**{{ p.host }}**: {{ 'logged in' if p.state == 'none' else p.state }}{% if p.kind %} ({{ p.kind }}){% endif %}{% if p.link %} - [connect](http://<ha-host>:8099{{ p.link }}){% endif %}
+
+      {% endfor %}
   - type: tile
     entity: sensor.tk_kid_a_week_left_pct
     name: Week (min left)
