@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import Any, Literal, Self
 
 EventType = Literal["time_low", "time_up", "login", "logout"]
-CmdOp = Literal["adjust_total"]
+CmdOp = Literal["adjust_total", "adjust_play", "end_inactive", "logout"]
+ActionOp = Literal["end_inactive", "logout"]
 
 
 class _Payload:
@@ -69,9 +70,12 @@ class Usage(_Payload):
     total_s: int
     day: str
     total_day_s: int
+    play_s: int = 0
+    play_day_s: int = 0
 
     def __post_init__(self) -> None:
-        _non_negative(total_s=self.total_s, total_day_s=self.total_day_s)
+        _non_negative(total_s=self.total_s, total_day_s=self.total_day_s,
+                      play_s=self.play_s, play_day_s=self.play_day_s)
 
 
 @dataclass(frozen=True)
@@ -82,9 +86,11 @@ class Remaining(_Payload):
     week: str
     total_s: int
     limited: bool = True
+    play_s: int = 0
+    play_limited: bool = False
 
     def __post_init__(self) -> None:
-        _non_negative(total_s=self.total_s)
+        _non_negative(total_s=self.total_s, play_s=self.play_s)
 
 
 @dataclass(frozen=True)
@@ -101,4 +107,23 @@ class Event(_Payload):
 @dataclass(frozen=True)
 class Cmd(_Payload):
     op: CmdOp
-    minutes: int
+    minutes: int = 0
+
+
+@dataclass(frozen=True)
+class Sessions(_Payload):
+    """Sessions of one kid on one host: `count` open, `locked` of them locked."""
+
+    count: int
+    locked: int
+
+    def __post_init__(self) -> None:
+        _non_negative(count=self.count, locked=self.locked)
+        if self.locked > self.count:
+            raise ValueError("locked must be <= count")
+
+
+@dataclass(frozen=True)
+class Action(_Payload):
+    op: ActionOp
+    ts: str
