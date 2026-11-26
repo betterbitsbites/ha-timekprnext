@@ -16,7 +16,7 @@ from datetime import timedelta
 from tk_protocol import topics
 from tk_protocol.bus import Bus
 from tk_protocol.clock import Clock
-from tk_protocol.payloads import Cmd, Remaining, Settings, Usage
+from tk_protocol.payloads import Action, Cmd, Remaining, Sessions, Settings, Usage
 
 from . import discovery
 from .engine import UsageLedger, effective, limit, week_key
@@ -42,6 +42,7 @@ class BudgetService:
         self._clock = clock
         self._kids: list[str] = []
         self._ledger = UsageLedger()
+        self._sessions: dict[tuple[str, str], Sessions] = {}  # (host, kid) -> latest report
         self._last: dict[str, tuple[str, str]] = {}  # kid -> (remaining json, state json)
         self._lock = threading.RLock()
 
@@ -53,6 +54,8 @@ class BudgetService:
         for kid in self._store.kids():
             self._announce(kid)
         self._bus.subscribe(f"{topics.PREFIX}/+/+/usage", self._on_usage)
+        self._bus.subscribe(f"{topics.PREFIX}/+/+/sessions", self._on_sessions)
+        self._bus.subscribe(f"{topics.PREFIX}/+/status", self._on_status)
         self._bus.subscribe(topics.cmd("+"), self._on_cmd)
         self._bus.subscribe(discovery.set_topic("+", "+"), self._on_set)
 
@@ -126,6 +129,32 @@ class BudgetService:
         self._publish(kid, force=False)
 
     @_locked
+    def _on_sessions(self, topic: str, payload: str) -> None:
+        parsed = topics.parse_sessions_topic(topic)
+        if parsed is None:
+            return
+        host, kid = parsed
+        if kid not in self._kids:
+            return  # kids are learned from usage reports only
+        try:
+            self._sessions[(host, kid)] = Sessions.from_json(payload)
+        except ValueError as e:
+            log.warning("ignoring malformed sessions on %s: %s", topic, e)
+            return
+        self._publish(kid, force=False)
+
+    @_locked
+    def _on_status(self, topic: str, payload: str) -> None:
+        host = topics.parse_status_topic(topic)
+        if host is None or payload != "offline":
+            return  # "online" does not restore counts; the next sessions report does
+        gone = [key for key in self._sessions if key[0] == host]
+        for key in gone:
+            del self._sessions[key]
+        for kid in {k for _, k in gone}:
+            self._publish(kid, force=False)
+
+    @_locked
     def _on_cmd(self, topic: str, payload: str) -> None:
         kid = topic.split("/")[1]
         if kid not in self._kids:
@@ -138,6 +167,10 @@ class BudgetService:
         if c.op == "adjust_total":
             self._store.add_adjustment_s(kid, self._week(), c.minutes * 60)
             self._store.add_day_adjustment_s(kid, self._clock.now().date().isoformat(), c.minutes * 60)
+        elif c.op in ("end_inactive", "logout"):
+            ts = self._clock.now().isoformat(timespec="seconds")
+            self._bus.publish(topics.action(kid), Action(op=c.op, ts=ts).to_json(), retain=False)
+            return
         self._publish(kid, force=False)
 
     @_locked
@@ -227,7 +260,11 @@ class BudgetService:
         limited, eff = effective([week_lim, day_lim, comb_lim])
         rem = eff if limited else week_lim.remaining_s
         rem_json = Remaining(week=week, total_s=eff if limited else 0, limited=limited).to_json()
+        by_host = {h: v.count for (h, k), v in sorted(self._sessions.items()) if k == kid and v.count > 0}
         state_json = json.dumps({
+            "sessions": sum(by_host.values()),
+            "sessions_locked": sum(v.locked for (_, k), v in self._sessions.items() if k == kid),
+            "sessions_by_host": by_host,
             "week": week,
             "day": day,
             "weekly_total_min": budget,

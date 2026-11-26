@@ -9,7 +9,7 @@ from tk_budget.store import Store
 from tk_protocol import topics
 from tk_protocol.bus import InMemoryBus
 from tk_protocol.clock import FixedClock
-from tk_protocol.payloads import Cmd, Remaining, Settings, Usage
+from tk_protocol.payloads import Action, Cmd, Remaining, Sessions, Settings, Usage
 
 KID = "kid-a"
 MONDAY = datetime(2026, 11, 16, 10, 0)
@@ -206,7 +206,7 @@ def test_discovery_published_retained_on_start(env):
 def test_discovery_has_all_entities():
     ents = discovery.entities(KID)
     by_id = {p["unique_id"]: (t, p) for t, p in ents}
-    assert len(ents) == 13
+    assert len(ents) == 16
     expected = {
         "tk_kid-a_daily_total_limit": "number",
         "tk_kid-a_daily_limit_active": "switch",
@@ -221,6 +221,9 @@ def test_discovery_has_all_entities():
         "tk_kid-a_adjust_minus_15": "button",
         "tk_kid-a_time_up_action": "select",
         "tk_kid-a_limit_active": "switch",
+        "tk_kid-a_sessions": "sensor",
+        "tk_kid-a_end_inactive_sessions": "button",
+        "tk_kid-a_logout": "button",
     }
     for uid, component in expected.items():
         topic, payload = by_id[uid]
@@ -431,3 +434,82 @@ def test_combined_entities_only_for_phone_kids(penv):
         assert (f"homeassistant/{comp}/tk_kid-b/{obj}/config", "", True) in bus.published
         assert f"homeassistant/{comp}/tk_kid-b/{obj}/config" not in bus.retained
         assert bus.retained[f"homeassistant/{comp}/tk_kid-a/{obj}/config"] != ""
+
+
+# --- sessions and actions -----------------------------------------------------
+
+def report_sessions(bus, host, count, locked, kid=KID):
+    bus.publish(topics.sessions(host, kid), Sessions(count, locked).to_json(), retain=True)
+
+
+def test_sessions_summed_over_hosts(env):
+    bus, *_ = env
+    report(bus, "pc1", 60)
+    report_sessions(bus, "pc1", 1, 0)
+    report_sessions(bus, "pc2", 2, 1)
+    st = state(bus)
+    assert (st["sessions"], st["sessions_locked"]) == (3, 1)
+    assert st["sessions_by_host"] == {"pc1": 1, "pc2": 2}
+
+
+def test_offline_host_counts_zero_until_it_reports_again(env):
+    bus, *_ = env
+    report(bus, "pc1", 60)
+    report_sessions(bus, "pc1", 1, 0)
+    report_sessions(bus, "pc2", 2, 1)
+    bus.publish("timekpr/pc2/status", "offline", retain=True)
+    st = state(bus)
+    assert (st["sessions"], st["sessions_locked"]) == (1, 0)
+    assert st["sessions_by_host"] == {"pc1": 1}
+    bus.publish("timekpr/pc2/status", "online", retain=True)
+    assert state(bus)["sessions"] == 1
+    report_sessions(bus, "pc2", 2, 1)
+    assert state(bus)["sessions"] == 3
+
+
+def test_sessions_for_unknown_kid_ignored(env):
+    bus, store, *_ = env
+    report_sessions(bus, "pc1", 1, 0, kid="nobody")
+    assert store.kids() == [KID]
+    assert topics.remaining("nobody") not in bus.retained
+
+
+def test_malformed_sessions_ignored(env):
+    bus, *_ = env
+    bus.publish(topics.sessions("pc1", KID), "garbage", retain=True)
+    assert state(bus)["sessions"] == 0
+
+
+@pytest.mark.parametrize("op", ["logout", "end_inactive"])
+def test_action_cmd_publishes_non_retained_action(env, op):
+    bus, *_ = env
+    before = len(bus.published)
+    bus.publish(topics.cmd(KID), Cmd(op=op).to_json())
+    acts = [(t, p, r) for t, p, r in bus.published[before:] if t == topics.action(KID)]
+    assert len(acts) == 1
+    t, p, r = acts[0]
+    assert r is False and topics.action(KID) not in bus.retained
+    a = Action.from_json(p)
+    assert a.op == op and a.ts == "2026-11-16T10:00:00"
+
+
+def test_action_cmd_for_unknown_kid_does_nothing(env):
+    bus, *_ = env
+    bus.publish(topics.cmd("nobody"), Cmd(op="logout").to_json())
+    assert not [t for t, *_ in bus.published if t == topics.action("nobody")]
+
+
+def test_session_entities():
+    by_id = {p["unique_id"]: p for _, p in discovery.entities(KID)}
+    s = by_id["tk_kid-a_sessions"]
+    assert s["value_template"] == "{{ value_json.sessions }}" and s["icon"] == "mdi:account-multiple"
+    assert s["json_attributes_topic"] == discovery.state_topic(KID)
+    assert "locked" in s["json_attributes_template"] and "by_host" in s["json_attributes_template"]
+    assert "tojson" in s["json_attributes_template"]
+    e = by_id["tk_kid-a_end_inactive_sessions"]
+    assert e["name"] == "End inactive sessions" and e["icon"] == "mdi:account-lock"
+    assert e["command_topic"] == topics.cmd(KID)
+    assert Cmd.from_json(e["payload_press"]) == Cmd(op="end_inactive")
+    lo = by_id["tk_kid-a_logout"]
+    assert lo["name"] == "Log out everywhere" and lo["icon"] == "mdi:logout"
+    assert Cmd.from_json(lo["payload_press"]) == Cmd(op="logout")

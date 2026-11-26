@@ -169,4 +169,18 @@ def entities(kid: str) -> list[tuple[str, dict]]:
                      " else {'remaining_min': none, 'limit_min': none}) | tojson }}"))
         out.append((_topic("sensor", kid, obj), p))
 
+    p = _base(kid, "sensor", "sessions", "Sessions")
+    p.update(state_topic=st, icon="mdi:account-multiple", value_template="{{ value_json.sessions }}",
+             json_attributes_topic=st,
+             json_attributes_template=("{{ {'locked': value_json.sessions_locked,"
+                                       " 'by_host': value_json.sessions_by_host} | tojson }}"))
+    out.append((_topic("sensor", kid, "sessions"), p))
+
+    for obj, name, op, icon in (("end_inactive_sessions", "End inactive sessions", "end_inactive",
+                                 "mdi:account-lock"),
+                                ("logout", "Log out everywhere", "logout", "mdi:logout")):
+        p = _base(kid, "button", obj, name)
+        p.update(command_topic=topics.cmd(kid), payload_press=Cmd(op=op).to_json(), icon=icon)
+        out.append((_topic("button", kid, obj), p))
+
     return out
