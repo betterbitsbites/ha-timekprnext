@@ -17,7 +17,8 @@ from typing import Callable
 LOCKOUT_TYPES = ("lock", "shutdown", "terminate", "suspend")
 _TIME_LEFT_RE = re.compile(r"^ACTUAL_TIME_LEFT_DAY:\s*(\S+)\s*$", re.MULTILINE)
 _PLAY_LEFT_RE = re.compile(r"^ACTUAL_PLAYTIME_LEFT_DAY:\s*(\S+)\s*$", re.MULTILINE)
-_USERLIST_HEADER_RE = re.compile(r"^\d+ users? in total:$")
+_PLAY_COUNT_RE = re.compile(r"^ACTUAL_ACTIVE_PLAYTIME_ACTIVITY_COUNT:\s*(\S+)\s*$", re.MULTILINE)
+_USERLIST_HEADER_RE =re.compile(r"^\d+ users? in total:$")
 
 Runner = Callable[[list[str]], str]
 
@@ -50,24 +51,29 @@ class Timekpra:
     def time_left_s(self, user: str) -> int | None:
         """Seconds left today, or None if the user has no session (timekpra prints only the
         header then, and `--settimeleft` has no effect: verified in Task 9)."""
-        return self._realtime(user, _TIME_LEFT_RE, "ACTUAL_TIME_LEFT_DAY")
+        out = self._realtime(user)
+        return None if out is None else _int_field(out, user, _TIME_LEFT_RE, "ACTUAL_TIME_LEFT_DAY")
 
     def play_left_s(self, user: str) -> int | None:
         """PlayTime seconds left today (`ACTUAL_PLAYTIME_LEFT_DAY`; 0 while PlayTime is off),
         or None if the user has no session (same header-only rule as `time_left_s`)."""
-        return self._realtime(user, _PLAY_LEFT_RE, "ACTUAL_PLAYTIME_LEFT_DAY")
+        out = self._realtime(user)
+        return None if out is None else _int_field(out, user, _PLAY_LEFT_RE, "ACTUAL_PLAYTIME_LEFT_DAY")
 
-    def _realtime(self, user: str, pattern: re.Pattern[str], name: str) -> int | None:
+    def play_rt(self, user: str) -> tuple[int, int] | None:
+        """(play left, number of running PlayTime activities) from one `--getuserinfort`
+        call, or None if the user has no session."""
+        out = self._realtime(user)
+        if out is None:
+            return None
+        return (_int_field(out, user, _PLAY_LEFT_RE, "ACTUAL_PLAYTIME_LEFT_DAY"),
+                _int_field(out, user, _PLAY_COUNT_RE, "ACTUAL_ACTIVE_PLAYTIME_ACTIVITY_COUNT"))
+
+    def _realtime(self, user: str) -> str | None:
         out = self._run(["--getuserinfort", _user(user)])
         if [line for line in out.splitlines() if line.strip()] == [f"# Configuration for user {user}:"]:
             return None
-        m = pattern.search(out)
-        if not m:
-            raise TimekpraError(f"{name} missing in timekpra output for {user}")
-        try:
-            return int(m.group(1))
-        except ValueError:
-            raise TimekpraError(f"{name} not an integer: {m.group(1)!r}") from None
+        return out
 
     def set_time_left_s(self, user: str, seconds: int) -> None:
         self._run(["--settimeleft", _user(user), "=", str(max(0, int(seconds)))])
@@ -79,6 +85,16 @@ class Timekpra:
         if value not in LOCKOUT_TYPES:
             raise ValueError(f"unsupported lockout type {value!r}")
         self._run(["--setlockouttype", _user(user), value])
+
+
+def _int_field(out: str, user: str, pattern: re.Pattern[str], name: str) -> int:
+    m = pattern.search(out)
+    if not m:
+        raise TimekpraError(f"{name} missing in timekpra output for {user}")
+    try:
+        return int(m.group(1))
+    except ValueError:
+        raise TimekpraError(f"{name} not an integer: {m.group(1)!r}") from None
 
 
 def _user(user: str) -> str:

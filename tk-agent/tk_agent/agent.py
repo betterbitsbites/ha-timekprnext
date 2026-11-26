@@ -11,7 +11,8 @@ once on the change limited -> unlimited, which hands back a full day so a locked
 
 Play time (timekpr's PlayTime) is a second, independent part of the same snapshot: its own
 meter (`<user>.play`), its own receipt point and its own release. timekpr shows play left
-capped by the total time left, so the play target is compared against that cap. If a play
+capped by the total time left, so the play target is compared against that cap, and a drop
+in play left counts as play only while timekpr reports a running PlayTime activity. If a play
 write does not stick (PlayTime off in timekpr), play is left alone until a new play
 snapshot or the next day; play usage is still measured and reported.
 """
@@ -27,7 +28,7 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Callable, Protocol
+from typing import Callable, Protocol, TypeVar
 
 from tk_protocol import topics
 from tk_protocol.bus import Bus
@@ -46,6 +47,7 @@ TIME_LOW_S = 300
 WRITE_TOLERANCE_S = 60
 ACTION_MAX_AGE_S = 120
 _ID_RE = re.compile(r"^[a-z0-9_-]+$")
+_T = TypeVar("_T")
 
 
 class TimekpraLike(Protocol):
@@ -54,6 +56,7 @@ class TimekpraLike(Protocol):
     def set_time_left_s(self, user: str, seconds: int) -> None: ...
     def set_lockout_type(self, user: str, value: str) -> None: ...
     def play_left_s(self, user: str) -> int | None: ...
+    def play_rt(self, user: str) -> tuple[int, int] | None: ...
     def set_play_left_s(self, user: str, seconds: int) -> None: ...
 
 
@@ -187,9 +190,11 @@ class Agent:
         play_left = None
         if left is not None:
             meter.observe(left)
-            play_left = self._read_play_left(user)
-            if play_left is not None:
-                pmeter.observe(play_left)
+            rt = self._read_play(user, self._tk.play_rt)
+            if rt is not None:
+                # play left also falls with the total cap: it is play only while an activity runs
+                play_left, activities = rt
+                pmeter.observe(play_left, count=activities > 0)
         week, day = meter.current_week(), meter.current_day()
         pweek, pday = pmeter.current_week(), pmeter.current_day()
         u = Usage(week=week, total_s=meter.week_total_s(week), day=day, total_day_s=meter.day_total_s(day),
@@ -258,9 +263,9 @@ class Agent:
                 log.warning("PlayTime seems off in timekpr for %s: wrote %d s play left, read back %d s; "
                             "not enforcing play until a new play limit or tomorrow", user, target, back)
 
-    def _read_play_left(self, user: str) -> int | None:
+    def _read_play(self, user: str, read: Callable[[str], _T]) -> _T | None:
         try:
-            value = self._tk.play_left_s(user)
+            value = read(user)
         except Exception as e:
             if user not in self._play_warned:
                 self._play_warned.add(user)
@@ -270,7 +275,7 @@ class Agent:
         return value
 
     def _play_wrote(self, user: str) -> int | None:
-        back = self._read_play_left(user)  # read back: exit codes prove nothing
+        back = self._read_play(user, self._tk.play_left_s)  # read back: exit codes prove nothing
         if back is not None:
             self._play_meters[user].wrote(back)
         return back

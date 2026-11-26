@@ -117,3 +117,13 @@ def test_state_file_written_atomically(state, clock, tmp_path):
     m = UsageMeter(state, clock)
     m.wrote(100)
     assert [p.name for p in tmp_path.iterdir()] == ["kid-a.json"]
+
+
+def test_observe_without_count_moves_baseline_only(state, clock):
+    m = UsageMeter(state, clock)
+    m.wrote(3600)
+    assert m.observe(3500, count=False) == 0
+    assert m.week_total_s("2026-W47") == 0
+    assert m.observe(3450) == 50  # measured from the moved baseline
+    m2 = UsageMeter(state, clock)  # persisted
+    assert m2.observe(3400) == 50

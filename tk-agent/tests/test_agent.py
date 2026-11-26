@@ -28,6 +28,8 @@ class FakeTimekpra:
         self.play_writes: list[tuple[str, int]] = []
         self.play_enabled = True  # False: PlayTime off in timekpr, play left reads 0, writes ignored
         self.play_consumed = 0
+        self.playing = False  # a PlayTime activity runs (ACTUAL_ACTIVE_PLAYTIME_ACTIVITY_COUNT > 0)
+        self.rt_calls = 0  # play_rt() calls (one --getuserinfort each)
         self.writes: list[tuple[str, int]] = []
         self.lockouts: list[tuple[str, str]] = []
         self.consumed = 0
@@ -66,6 +68,11 @@ class FakeTimekpra:
             return 0
         return min(self.play_left, self.time_left_s(user))
 
+    def play_rt(self, user: str) -> tuple[int, int] | None:
+        self.rt_calls += 1
+        left = self.play_left_s(user)
+        return None if left is None else (left, 1 if self.playing else 0)
+
     def set_play_left_s(self, user: str, seconds: int) -> None:
         self.play_writes.append((user, seconds))
         if user not in self.logged_out and self.play_enabled:
@@ -74,6 +81,7 @@ class FakeTimekpra:
     def run(self, seconds: int, playing: bool = True) -> None:
         """User active for `seconds` (playing: a PlayTime activity runs); the clock advances too."""
         used = min(seconds, self.time_left_s(USER))
+        self.playing = playing  # the game is still running when the agent reads next
         if playing and self.play_enabled:
             played = min(seconds, self.play_left_s(USER))
             self.play_left -= played
@@ -841,3 +849,35 @@ def test_play_not_written_while_logged_out(env):
     tk.logged_out.discard(USER)
     agent.tick()
     assert tk.play_writes == [(USER, 600)]
+
+
+def test_play_capped_by_total_not_counted_without_activity(env):
+    agent, bus, tk, _ = env
+    agent.start()  # play allowance 86400 >= total left: play left falls with every active second
+    agent.tick()
+    for _ in range(3):
+        tk.run(100, playing=False)
+        agent.tick()
+    assert tk.play_left_s(USER) < 86400 - 200  # play left did fall (total cap)
+    assert usage(bus).play_s == 0 and usage(bus).play_day_s == 0
+    assert usage(bus).total_s == 300
+
+
+def test_play_capped_by_total_counted_while_activity_runs(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    agent.tick()
+    tk.run(100, playing=False)
+    agent.tick()
+    tk.run(100, playing=True)
+    agent.tick()
+    assert usage(bus).play_s == 100 and usage(bus).total_s == 200
+
+
+def test_play_read_is_one_realtime_call_per_tick(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    for _ in range(3):
+        agent.tick()
+        tk.run(45)
+    assert tk.rt_calls == 3

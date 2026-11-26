@@ -97,3 +97,23 @@ def test_set_play_left_builds_expected_command():
     Timekpra(run).set_play_left_s("kid-a", 600)
     Timekpra(run).set_play_left_s("kid-a", -5)
     assert run.calls == [["--setplaytimeleft", "kid-a", "=", "600"], ["--setplaytimeleft", "kid-a", "=", "0"]]
+
+
+def test_play_rt_parses_play_left_and_activity_count_in_one_call():
+    run = FakeRunner((FIXTURES / "getuserinfort-play.txt").read_text())
+    assert Timekpra(run).play_rt("kid-a") == (17316, 16)
+    assert run.calls == [["--getuserinfort", "kid-a"]]
+
+
+def test_play_rt_without_activity_from_spike_fixture():
+    assert Timekpra(FakeRunner((FIXTURES / "getuserinfort.txt").read_text())).play_rt("tkprobe") == (0, 0)
+
+
+def test_play_rt_of_logged_out_user_is_none():
+    run = FakeRunner((FIXTURES / "getuserinfort-logged-out.txt").read_text())
+    assert Timekpra(run).play_rt("kid-a") is None
+
+
+def test_play_rt_missing_count_raises():
+    with pytest.raises(TimekpraError):
+        Timekpra(FakeRunner("# Configuration for user x:\nACTUAL_PLAYTIME_LEFT_DAY: 5\n")).play_rt("x")

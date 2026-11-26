@@ -35,12 +35,13 @@ class UsageMeter:
         self._s["baseline_day"] = self._s["day"]
         self._save()
 
-    def observe(self, time_left_s: int) -> int:
-        """Count usage since the last baseline; returns it (≥ 0)."""
+    def observe(self, time_left_s: int, count: bool = True) -> int:
+        """Count usage since the last baseline; returns it (≥ 0). With `count=False` only the
+        baseline moves to `time_left_s` (the drop is known not to be usage)."""
         self._roll()
         base = self._s["baseline"]
         used = 0
-        if base is not None and self._s["baseline_day"] == self._s["day"]:
+        if count and base is not None and self._s["baseline_day"] == self._s["day"]:
             used = max(0, base - int(time_left_s))
         self._s["week_total_s"] += used
         self._s["day_total_s"] += used
