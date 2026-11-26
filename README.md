@@ -57,21 +57,32 @@ A separate play budget per kid: weekly and daily play limits, each with its own 
 
 - **PlayTime must be enabled in timekpr** for the kid, with activity masks (process names) for the games or launchers. Do not rely on the `PLAYTIME_ENABLED` flag in `timekpra --getuserinfo`; it can be stale.
 - **Play counts only while a matching process runs.** A running Steam client counts as play if a mask matches it. Locked screen time counts for neither total nor play (timekpr's `TRACK_INACTIVE` off).
-- **timekpr's own limits must not bind**, because the lower limit always wins: HA governs. Set timekpr's weekly and daily time limits and its PlayTime daily limit high, for example `sudo timekpra --setlimitweek <kid-user> 604800` (7 days in seconds), daily limits 24 h, PlayTime daily limit 24 h.
-- The agent writes the remaining play time with `timekpra --setplaytimeleft`. If timekpr does not apply it (for example PlayTime is off), the agent logs one warning.
+- **timekpr's own limits must not bind**, because the lower limit always wins: HA governs. On every PC, per kid (values in seconds):
+
+  ```sh
+  sudo timekpra --settimelimitweek <kid-user> 604800        # weekly limit: 7 days
+  sudo timekpra --setalloweddays <kid-user> '1;2;3;4;5;6;7' # all days allowed (check with `timekpra --help`)
+  sudo timekpra --settimelimits <kid-user> '86400;86400;86400;86400;86400;86400;86400'          # daily: 24 h per allowed day
+  sudo timekpra --setplaytimeenabled <kid-user> true
+  sudo timekpra --setplaytimelimits <kid-user> '86400;86400;86400;86400;86400;86400;86400'      # PlayTime daily: 24 h
+  ```
+
+  The option names are taken from our timekpr notes and `spike/probe-play.sh`, not from a captured `timekpra --help`; `--setalloweddays` and its value format in particular are unverified, so check them with `timekpra --help`. If a monthly limit is set in timekpr, raise it as well. PlayTime also needs the global switch `TIMEKPR_PLAYTIME_ENABLED = True` in `/etc/timekpr/timekpr.conf` (then `systemctl restart timekpr`).
+- The agent writes the remaining play time with `timekpra --setplaytimeleft`. If timekpr does not apply it (for example PlayTime is off), the agent logs one warning "PlayTime seems off" and leaves play alone, retrying every 15 minutes, on the next day and when a play limit is switched on or off.
+- **Play limits are verified on real hardware only once** `sudo spike/probe-play.sh write` (test user only) has been run. Until then, watch the agent log (`journalctl -u tk-agent`) for "PlayTime seems off".
 
 ### Sessions
 
-The sensor "Sessions" shows how many login sessions the kid has across all PCs (only `Class=user` sessions count; the attributes list `locked` and `by_host`). Two buttons act on all PCs of the kid:
+The sensor "Sessions" shows how many login sessions the kid has across all PCs (only `Class=user` sessions count, sessions already closing do not; the attributes list `locked` and `by_host`; a PC that is offline counts 0). Two buttons act on all PCs of the kid:
 
 - **End inactive sessions** ends sessions that are locked or not the active one.
 - **Log out everywhere** terminates all sessions of the kid (`loginctl terminate-user`).
 
-Agents pick the action up within one report interval (≤ 45 s) and ignore actions older than 2 minutes, so a PC that was offline does not log the kid out later.
+Agents run an action as soon as the message arrives; only the session count refreshes on the next report (≤ 45 s). They ignore actions older than 2 minutes, so a PC that was offline does not log the kid out later. This needs the HA host and the PCs within 2 minutes of each other and in the same timezone: keep their clocks synced (NTP).
 
 ### Upgrade to add-on 0.5.0 / agent 0.2.0
 
-Rebuild and install the package on every PC (`makepkg -si`, tk-agent 0.2.0) and update the add-on to 0.5.0. Old agents keep working; they just report no play time and no sessions.
+Rebuild and install the package on every PC (`makepkg -si`, tk-agent 0.2.0) and update the add-on to 0.5.0. On PCs still running agent 0.1.x the total limits keep working, but **play limits are not enforced** there and no sessions are reported.
 
 ### Phone time from Google Family Link (optional)
 
@@ -214,9 +225,23 @@ cards:
           - entity: button.tk_kid_a_end_inactive_sessions
             name: End inactive sessions
             icon: mdi:account-lock
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.tk_kid_a_end_inactive_sessions
+              confirmation:
+                text: End kid-a's inactive sessions on all PCs?
           - entity: button.tk_kid_a_logout
             name: Log out everywhere
             icon: mdi:logout
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.tk_kid_a_logout
+              confirmation:
+                text: Log kid-a out on all PCs?
       - entity: select.tk_kid_a_time_up_action
         name: When time is up
 ```
