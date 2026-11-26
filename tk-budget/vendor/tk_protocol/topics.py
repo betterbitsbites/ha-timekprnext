@@ -35,6 +35,20 @@ def action(kid: str) -> str:
     return f"{PREFIX}/{kid}/action"
 
 
+def applied(host: str, kid: str) -> str:
+    return f"{PREFIX}/{host}/{kid}/applied"
+
+
+def parse_applied_topic(topic: str) -> tuple[str, str] | None:
+    """Return (host, kid) for an applied topic, else None."""
+    parts = topic.split("/")
+    if len(parts) != 4 or parts[0] != PREFIX or parts[3] != "applied":
+        return None
+    if not parts[1] or not parts[2]:
+        return None
+    return parts[1], parts[2]
+
+
 def parse_sessions_topic(topic: str) -> tuple[str, str] | None:
     """Return (host, kid) for a sessions topic, else None."""
     parts = topic.split("/")

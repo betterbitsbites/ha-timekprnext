@@ -1,6 +1,6 @@
 import pytest
 
-from tk_protocol.payloads import Action, Cmd, Event, Remaining, Sessions, Settings, Usage
+from tk_protocol.payloads import Action, Applied, Cmd, Event, Remaining, Sessions, Settings, Usage
 
 
 def test_usage_roundtrip():
@@ -84,6 +84,51 @@ def test_sessions_validation():
         Sessions(count=-1, locked=0)
     with pytest.raises(ValueError):
         Sessions(count=1, locked=-1)
+
+
+def test_sessions_old_payload_defaults():
+    s = Sessions.from_json('{"count":1,"locked":0}')
+    assert (s.state, s.kind, s.connect) == ("none", "none", "")
+
+
+def test_sessions_presence_roundtrip_with_empty_connect():
+    s = Sessions(count=1, locked=0, state="active", kind="wayland", connect="")
+    assert Sessions.from_json(s.to_json()) == s
+    s2 = Sessions(count=1, locked=1, state="locked", kind="tty", connect="ssh://x")
+    assert Sessions.from_json(s2.to_json()) == s2
+
+
+def test_sessions_bad_kind_and_state():
+    with pytest.raises(ValueError):
+        Sessions.from_json('{"count":1,"locked":0,"kind":"mir"}')
+    with pytest.raises(ValueError):
+        Sessions.from_json('{"count":1,"locked":0,"state":"gone"}')
+
+
+def test_required_str_still_non_empty():
+    with pytest.raises(ValueError):
+        Event.from_json('{"type":"login","ts":""}')
+
+
+def test_rev_fields():
+    assert Remaining.from_json('{"week":"2026-W47","total_s":1}').rev == 0
+    assert Settings.from_json('{"time_up_action":"lock"}').rev == 0
+    assert Settings.from_json(Settings(time_up_action="lock", rev=3).to_json()).rev == 3
+    with pytest.raises(ValueError):
+        Settings.from_json('{"time_up_action":"lock","rev":""}')
+    with pytest.raises(ValueError):
+        Settings(time_up_action="lock", rev=-1)
+    with pytest.raises(ValueError):
+        Remaining(week="2026-W47", total_s=1, rev=-1)
+
+
+def test_applied():
+    a = Applied(rev=4)
+    assert Applied.from_json(a.to_json()) == a
+    with pytest.raises(ValueError):
+        Applied(rev=-1)
+    with pytest.raises(ValueError):
+        Applied.from_json('{}')
 
 
 def test_action_roundtrip_and_rejects_bad_op():

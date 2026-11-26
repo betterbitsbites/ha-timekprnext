@@ -32,11 +32,12 @@ class _Payload:
                 if f.default is not dataclasses.MISSING:
                     continue  # optional field, added later: keep the dataclass default
                 raise ValueError(f"missing field {f.name!r}")
-            kwargs[f.name] = _check(f.name, hints[f.name], data[f.name])
+            kwargs[f.name] = _check(f.name, hints[f.name], data[f.name],
+                                    allow_empty=f.default == "")
         return cls(**kwargs)
 
 
-def _check(name: str, tp: Any, value: Any) -> Any:
+def _check(name: str, tp: Any, value: Any, allow_empty: bool = False) -> Any:
     if typing.get_origin(tp) is Literal:
         if value not in typing.get_args(tp):
             raise ValueError(f"{name}: {value!r} not one of {typing.get_args(tp)}")
@@ -50,8 +51,8 @@ def _check(name: str, tp: Any, value: Any) -> Any:
             raise ValueError(f"{name}: expected int")
         return value
     if tp is str:
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"{name}: expected non-empty string")
+        if not isinstance(value, str) or not (value or allow_empty):
+            raise ValueError(f"{name}: expected {'a' if allow_empty else 'non-empty'} string")
         return value
     raise TypeError(f"unsupported field type {tp!r}")
 
@@ -88,14 +89,29 @@ class Remaining(_Payload):
     limited: bool = True
     play_s: int = 0
     play_limited: bool = False
+    rev: int = 0
 
     def __post_init__(self) -> None:
-        _non_negative(total_s=self.total_s, play_s=self.play_s)
+        _non_negative(total_s=self.total_s, play_s=self.play_s, rev=self.rev)
 
 
 @dataclass(frozen=True)
 class Settings(_Payload):
     time_up_action: str
+    rev: int = 0
+
+    def __post_init__(self) -> None:
+        _non_negative(rev=self.rev)
+
+
+@dataclass(frozen=True)
+class Applied(_Payload):
+    """Ack from a client: the settings/remaining revision it has applied."""
+
+    rev: int
+
+    def __post_init__(self) -> None:
+        _non_negative(rev=self.rev)
 
 
 @dataclass(frozen=True)
@@ -116,6 +132,9 @@ class Sessions(_Payload):
 
     count: int
     locked: int
+    state: Literal["active", "locked", "away", "none"] = "none"
+    kind: Literal["wayland", "x11", "tty", "none"] = "none"
+    connect: str = ""
 
     def __post_init__(self) -> None:
         _non_negative(count=self.count, locked=self.locked)

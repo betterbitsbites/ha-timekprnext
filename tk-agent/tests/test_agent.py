@@ -506,7 +506,8 @@ def test_sessions_published_retained_once_and_on_change(senv):
     fs.by_user[USER] = [sess("5", locked=True)]
     agent.tick()
     agent.tick()
-    assert json.loads(bus.retained[topics.sessions(HOST, KID)]) == {"count": 1, "locked": 1}
+    assert json.loads(bus.retained[topics.sessions(HOST, KID)]) == {
+        "count": 1, "locked": 1, "state": "none", "kind": "none", "connect": ""}
     assert [r for t, _, r in bus.published if t == topics.sessions(HOST, KID)] == [True]
     assert published_sessions(bus) == [Sessions(1, 1)]
     fs.by_user[USER] = [sess("5", locked=True), sess("8")]
