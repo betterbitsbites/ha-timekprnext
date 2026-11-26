@@ -1,0 +1,12 @@
+Id=6
+Name=kid-a
+Timestamp=Thu 2026-11-26 11:42:29 CET
+Seat=
+TTY=
+Remote=no
+Type=unspecified
+Class=manager
+Active=yes
+State=active
+IdleHint=no
+LockedHint=no
