@@ -23,7 +23,8 @@ Apply feedback: a `remaining` with a new revision (parent input) or changed `set
 ticks stay on the main thread). A remaining that changed only through usage reports (same rev)
 does not wake: that would tick, report usage and be answered again at once, in a loop. Both
 carry tk-budget's revision `rev`; after a tick that finished for a logged-in user, the agent acks
-the highest revision it holds for that user with a retained `Applied` (rev 0 is never acked).
+the highest revision it holds for that user with a retained `Applied`. Nothing is acked before a remaining snapshot exists; after that
+even rev 0 is acked once (nothing acked yet counts as -1), and any change of rev, also a lower one.
 A new rev with unchanged values counts as a change (wake, ack) but keeps the receipt points.
 """
 
@@ -155,7 +156,7 @@ class Agent:
         """After a reconnect: the broker may have fired the last will, and missed sessions reports."""
         self._bus.publish(topics.status(self.cfg.host_id), "online", retain=True)
         self._sess_sent.clear()  # the next tick republishes sessions
-        self._acked = dict.fromkeys(self._acked, 0)  # ... and acks, in case one was lost
+        self._acked = dict.fromkeys(self._acked, -1)  # ... and acks, in case one was lost
 
     @_locked
     def tick(self) -> None:
@@ -171,8 +172,10 @@ class Agent:
 
     def _ack(self, user: str) -> None:
         snap = self._snap[user]
-        want = max(snap.rev if snap is not None else 0, self._settings_rev[user])
-        if want > self._acked[user]:
+        if snap is None:
+            return  # never ack a remaining not seen yet
+        want = max(snap.rev, self._settings_rev[user])
+        if want != self._acked[user]:  # != also covers a budget whose rev went backwards
             self._bus.publish(topics.applied(self.cfg.host_id, user), Applied(rev=want).to_json(), retain=True)
             self._acked[user] = want
 
@@ -202,7 +205,8 @@ class Agent:
         self._snap[user] = self._load_snapshot(user)
         self._action_wanted[user] = self._action_applied[user] = None
         self._low_sent[user] = self._up_sent[user] = False
-        self._settings_rev[user] = self._acked[user] = 0
+        self._settings_rev[user] = 0
+        self._acked[user] = -1
         for kind, handler in (("usage", self._on_own_usage), ("remaining", self._on_remaining),
                               ("settings", self._on_settings)):
             msg = self._pending.pop((kind, user), None)

@@ -1090,6 +1090,7 @@ def test_settings_only_change_wakes_and_is_acked(env):
 def test_settings_same_action_new_rev_wakes(env):
     agent, bus, tk, _ = env
     agent.start()
+    send_rev(bus, 600, rev=1)
     bus.publish(topics.settings(KID), Settings(time_up_action="lock", rev=1).to_json(), retain=True)
     agent.tick()
     agent.wake.clear()
@@ -1099,12 +1100,31 @@ def test_settings_same_action_new_rev_wakes(env):
     assert acks(bus) == [(1, True), (2, True)]
 
 
-def test_rev_zero_never_acked(env):
+def test_rev_zero_acked_once_snapshot_exists(env):
     agent, bus, tk, _ = env
     agent.start()
     send_remaining(bus, 600)
     agent.tick()
+    assert acks(bus) == [(0, True)]
+    agent.tick()
+    assert acks(bus) == [(0, True)]  # unchanged rev: no repeat
+
+
+def test_no_ack_before_any_snapshot(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    agent.tick()
     assert acks(bus) == []
+
+
+def test_lower_rev_after_higher_is_acked(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_rev(bus, 600, rev=5)
+    agent.tick()
+    send_rev(bus, 600, rev=1)  # budget DB was reset
+    agent.tick()
+    assert acks(bus) == [(5, True), (1, True)]
 
 
 def test_failed_tick_not_acked(env):
@@ -1138,7 +1158,7 @@ def test_old_snapshot_without_rev_loads_as_zero(env, tmp_path):
     agent.start()
     agent.tick()
     assert tk.writes == [(USER, 600)]
-    assert acks(bus) == []
+    assert acks(bus) == [(0, True)]
 
 
 def test_reconnect_reacks(env):
