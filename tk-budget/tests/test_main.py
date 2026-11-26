@@ -1,8 +1,10 @@
 import json
+import logging
+import socket
 
 import pytest
 
-from tk_budget.main import SUPERVISOR_MQTT_URL, load_options, resolve_broker
+from tk_budget.main import SUPERVISOR_MQTT_URL, load_options, resolve_broker, start_links
 
 SERVICE = {"result": "ok", "data": {"host": "core-mosquitto", "port": 1883, "ssl": False,
                                     "protocol": "3.1.1", "username": "addons", "password": "secret"}}
@@ -98,3 +100,12 @@ def test_config_yaml_maps_link_port():
     assert 'version: "0.6.0"' in text
     assert "link_port: 8099" in text and "link_port: port" in text
     assert '"8099/tcp": 8099' in text and "ports_description:" in text
+
+
+def test_start_links_bind_failure_is_logged_not_fatal(caplog):
+    with socket.socket() as busy:
+        busy.bind(("0.0.0.0", 0))
+        busy.listen()
+        with caplog.at_level(logging.ERROR, logger="tk_budget"):
+            assert start_links(lambda kid, host: None, busy.getsockname()[1]) is None
+    assert any("remote links disabled" in r.getMessage() for r in caplog.records)

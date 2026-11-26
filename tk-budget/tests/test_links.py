@@ -11,6 +11,7 @@ URLS = {
     ("kid-a", "pc2"): "rdp://full%20address=s:pc2.lan",
     ("kid-a", "web"): "http://pc3.lan/",
     ("kid-a", "evil"): "vnc://pc1.lan\r\nSet-Cookie: x=1",
+    ("kid-a", "uni"): "vnc://pc\u20ac:5900",
 }
 
 
@@ -75,6 +76,12 @@ def test_only_rdp_and_vnc_redirected(server):
     srv, _ = server
     assert request(srv, "/connect/kid-a/web") == (404, None)
     assert request(srv, "/connect/kid-a/evil") == (404, None)
+
+
+def test_non_ascii_url_404_and_server_keeps_serving(server):
+    srv, _ = server
+    assert request(srv, "/connect/kid-a/uni") == (404, None)
+    assert request(srv, "/connect/kid-a/pc1")[0] == 302
 
 
 @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "HEAD", "OPTIONS"])

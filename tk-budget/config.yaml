@@ -27,7 +27,8 @@ options:
   link_port: 8099
 schema:
   db_path: str
-  # Port the redirect server listens on inside the add-on (keep it in line with `ports`)
+  # Port the redirect server listens on inside the add-on. Leave it at 8099; to use another port on
+  # the host, change the host-side port in the add-on's Network settings instead.
   link_port: port
   # Kids with a Google Family Link sensor (phone time), e.g. kid: kid-a, entity: sensor.<child>_daily_screen_time
   familylink:

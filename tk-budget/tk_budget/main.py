@@ -90,6 +90,17 @@ def resolve_broker(opts: Mapping, env: Mapping[str, str], fetch: Fetch = _urllib
             "username": data.get("username"), "password": data.get("password")}
 
 
+def start_links(lookup, port: int) -> LinkServer | None:
+    """Start the redirect server; if the port cannot be bound, carry on without remote links."""
+    srv = LinkServer(lookup, port)
+    try:
+        srv.start()
+    except OSError as e:
+        log.error("remote links disabled: cannot listen on port %s (%s)", port, e)
+        return None
+    return srv
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     opts = load_options(OPTIONS_PATH)
@@ -102,7 +113,7 @@ def main() -> None:
     service = BudgetService(bus, store, SystemClock(), phone_kids=phone.keys())
     poller = PhonePoller(phone, os.environ, _urllib_fetch)
     service.start()
-    LinkServer(service.connect_url, opts["link_port"]).start()
+    start_links(service.connect_url, opts["link_port"])
     log.info("tk-budget running; known kids: %s", ", ".join(store.kids()) or "none yet")
     log.info("Family Link kids: %s", ", ".join(phone) or "none")
     while True:

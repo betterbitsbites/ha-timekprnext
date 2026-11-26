@@ -39,7 +39,7 @@ def _redirect_target(lookup: Lookup, raw_path: str) -> str | None:
         return None
     if not url or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in url):
         return None
-    if urllib.parse.urlsplit(url).scheme not in SCHEMES:
+    if not url.isascii() or urllib.parse.urlsplit(url).scheme not in SCHEMES:
         return None
     log.info("redirecting %s on %s to its %s link", kid, host, urllib.parse.urlsplit(url).scheme)
     return url
@@ -47,6 +47,7 @@ def _redirect_target(lookup: Lookup, raw_path: str) -> str | None:
 
 class _Handler(BaseHTTPRequestHandler):
     server: "_Server"
+    timeout = 10  # seconds; drop clients that stall mid-request
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib signature
         pass  # quiet: one INFO line per redirect is logged by _redirect_target
