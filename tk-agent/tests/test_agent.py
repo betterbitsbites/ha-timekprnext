@@ -601,6 +601,42 @@ def test_retained_action_handled_per_message_and_agent_never_publishes_action(se
     assert [t for t, _, _ in bus.published if t == topics.action(KID)] == [topics.action(KID)]  # the test's own
 
 
+def test_sessions_count_leaves_out_closing(senv):
+    agent, bus, tk, clock, fs = senv
+    fs.by_user[USER] = [sess("1"), sess("2", state="closing", locked=True)]
+    agent.tick()
+    assert published_sessions(bus) == [Sessions(1, 0)]
+    action(bus, "end_inactive", clock.now().isoformat())
+    assert fs.ended_sessions == ["2"]  # closing sessions are still ended
+
+
+def test_retained_action_from_before_start_ignored(env):
+    agent, bus, tk, clock = env
+    action(bus, "logout", clock.now().isoformat(), retain=True)
+    fs = FakeSessions()
+    agent = Agent(agent.cfg, bus, tk, agent._meter_factory, clock, fs)
+    agent.start()
+    agent.tick()
+    bus.drop()
+    bus.reconnect()
+    agent.tick()
+    assert fs.ended_users == []
+
+
+def test_reconnect_republishes_online_and_sessions(senv):
+    agent, bus, tk, clock, fs = senv
+    fs.by_user[USER] = [sess("1")]
+    agent.tick()
+    agent.tick()
+    assert published_sessions(bus) == [Sessions(1, 0)]
+    bus.publish(topics.status(HOST), "offline", retain=True)  # the broker fired the last will
+    bus.drop()
+    bus.reconnect()
+    assert bus.retained[topics.status(HOST)] == "online"
+    agent.tick()
+    assert published_sessions(bus) == [Sessions(1, 0), Sessions(1, 0)]
+
+
 def test_action_triggers_republish_next_tick(senv):
     agent, bus, tk, clock, fs = senv
     fs.by_user[USER] = [sess("1", locked=True)]
@@ -713,7 +749,7 @@ def test_play_release_ignores_unenforceable_guard(env):
     assert tk.play_writes == [(USER, 600), (USER, 86400)]
 
 
-def test_play_off_in_timekpr_one_write_and_one_warning_per_snapshot(env, caplog):
+def test_play_off_in_timekpr_one_write_and_one_warning_per_episode(env, caplog):
     agent, bus, tk, _ = env
     tk.play_enabled = False
     agent.start()
@@ -724,12 +760,53 @@ def test_play_off_in_timekpr_one_write_and_one_warning_per_snapshot(env, caplog)
             tk.run(45)
     assert tk.play_writes == [(USER, 1800)]
     assert len(play_warnings(caplog)) == 1
-    send_play(bus, 1500)  # new play snapshot: try again once
+    send_play(bus, 1500)  # a new play value alone does not clear the guard
     with caplog.at_level("WARNING"):
         for _ in range(3):
             agent.tick()
-    assert tk.play_writes == [(USER, 1800), (USER, 1500)]
-    assert len(play_warnings(caplog)) == 2
+    assert tk.play_writes == [(USER, 1800)]
+    assert len(play_warnings(caplog)) == 1
+
+
+def test_play_off_guard_holds_while_total_caps_play(env, caplog):
+    """tk-budget caps play by total, so play_s changes with every usage report. PlayTime off in timekpr."""
+    agent, bus, tk, clock = env
+    tk.play_enabled = False
+    agent.start()
+    total = 3600
+    with caplog.at_level("WARNING"):
+        for _ in range(6):
+            send_play(bus, total, total_s=total, limited=True)
+            agent.tick()
+            tk.run(45, playing=False)
+            total -= 45
+        assert len(tk.play_writes) == 1
+        assert len(play_warnings(caplog)) == 1
+        start = clock.now()
+        while clock.now() - start < timedelta(minutes=15):
+            send_play(bus, total, total_s=total, limited=True)
+            agent.tick()
+            tk.run(45, playing=False)
+            total -= 45
+        send_play(bus, total, total_s=total, limited=True)
+        agent.tick()
+    assert len(tk.play_writes) == 2  # one retry after 15 minutes
+    assert len(play_warnings(caplog)) == 1  # one warning per episode
+
+
+def test_play_off_guard_cleared_by_play_limited_change(env):
+    agent, bus, tk, _ = env
+    tk.play_enabled = False
+    agent.start()
+    send_play(bus, 1800)
+    agent.tick()
+    agent.tick()
+    assert tk.play_writes == [(USER, 1800)]
+    send_play(bus, 0, play_limited=False)
+    agent.tick()  # release
+    send_play(bus, 1800)
+    agent.tick()
+    assert tk.play_writes == [(USER, 1800), (USER, 86400), (USER, 1800)]
 
 
 def test_play_unenforceable_retried_next_day(env, caplog):

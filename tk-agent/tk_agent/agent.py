@@ -13,8 +13,10 @@ Play time (timekpr's PlayTime) is a second, independent part of the same snapsho
 meter (`<user>.play`), its own receipt point and its own release. timekpr shows play left
 capped by the total time left, so the play target is compared against that cap, and a drop
 in play left counts as play only while timekpr reports a running PlayTime activity. If a play
-write does not stick (PlayTime off in timekpr), play is left alone until a new play
-snapshot or the next day; play usage is still measured and reported.
+write does not stick (PlayTime off in timekpr), play is left alone until the next day, a
+change of play limited/unlimited, or 15 minutes later (so PlayTime switched on later is picked
+up); a changed play value alone does not retry, since tk-budget caps play by total and so
+changes it with every usage report. Play usage is still measured and reported.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ MAX_TIME_LEFT_S = 24 * 3600
 TIME_LOW_S = 300
 WRITE_TOLERANCE_S = 60
 ACTION_MAX_AGE_S = 120
+PLAY_OFF_RETRY = timedelta(minutes=15)
 _ID_RE = re.compile(r"^[a-z0-9_-]+$")
 _T = TypeVar("_T")
 
@@ -112,7 +115,9 @@ class Agent:
         # per-user state, created when a user first appears in timekpr's list
         self._meters: dict[str, UsageMeter] = {}
         self._play_meters: dict[str, UsageMeter] = {}
-        self._play_off: dict[str, str | None] = {}  # day play was found unenforceable, None = fine
+        # (day, when) a play write did not stick; None = fine. Warned once per episode (day / play_limited).
+        self._play_off: dict[str, tuple[str, datetime] | None] = {}
+        self._play_off_warned: set[str] = set()
         self._play_warned: set[str] = set()  # play_left_s failed (warned once)
         self._snap: dict[str, _Snapshot | None] = {}
         self._action_wanted: dict[str, str | None] = {}
@@ -130,7 +135,14 @@ class Agent:
         self._bus.subscribe(topics.remaining("+"), self._on_remaining)
         self._bus.subscribe(topics.settings("+"), self._on_settings)
         if self._sessions is not None:
-            self._bus.subscribe(topics.action("+"), self._on_action)
+            self._bus.subscribe(topics.action("+"), self._on_action, retained=False)
+        self._bus.on_connect(self._on_reconnect)
+
+    @_locked
+    def _on_reconnect(self) -> None:
+        """After a reconnect: the broker may have fired the last will, and missed sessions reports."""
+        self._bus.publish(topics.status(self.cfg.host_id), "online", retain=True)
+        self._sess_sent.clear()  # the next tick republishes sessions
 
     @_locked
     def tick(self) -> None:
@@ -247,9 +259,14 @@ class Agent:
                 self._save_snapshot(user, snap)
             return
         today = pmeter.current_day()
-        if self._play_off[user] == today:
-            return  # a play write did not stick today: leave PlayTime alone until a new play snapshot
-        self._play_off[user] = None
+        now = self._clock.now()
+        off = self._play_off[user]
+        if off is not None:
+            if off[0] == today and now - off[1] < PLAY_OFF_RETRY:
+                return  # a play write did not stick: leave PlayTime alone for now
+            if off[0] != today:
+                self._play_off_warned.discard(user)  # new day: a new episode
+            self._play_off[user] = None
         week = pmeter.current_week()
         used = pmeter.week_total_s(week)
         since = used - snap.play_receipt_usage_s if snap.play_receipt_week == week else used
@@ -259,9 +276,14 @@ class Agent:
             self._tk.set_play_left_s(user, target)
             back = self._play_wrote(user)
             if back is not None and abs(back - expected) >= WRITE_TOLERANCE_S:
-                self._play_off[user] = today
-                log.warning("PlayTime seems off in timekpr for %s: wrote %d s play left, read back %d s; "
-                            "not enforcing play until a new play limit or tomorrow", user, target, back)
+                self._play_off[user] = (today, now)
+                if user in self._play_off_warned:
+                    log.info("PlayTime still off in timekpr for %s (read back %d s)", user, back)
+                else:
+                    self._play_off_warned.add(user)
+                    log.warning("PlayTime seems off in timekpr for %s: wrote %d s play left, read back %d s; "
+                                "not enforcing play, retrying every %d min", user, target, back,
+                                int(PLAY_OFF_RETRY.total_seconds() // 60))
 
     def _read_play(self, user: str, read: Callable[[str], _T]) -> _T | None:
         try:
@@ -291,7 +313,8 @@ class Agent:
                 log.warning("loginctl failed for %s (%s); not reporting sessions", user, e)
             return
         self._sess_warned.discard(user)
-        report = Sessions(count=len(found), locked=sum(1 for s in found if s.locked))
+        live = [s for s in found if s.state != "closing"]  # closing: already ending, not counted
+        report = Sessions(count=len(live), locked=sum(1 for s in live if s.locked))
         if self._sess_sent.get(user) != report:
             self._bus.publish(topics.sessions(self.cfg.host_id, user), report.to_json(), retain=True)
             self._sess_sent[user] = report
@@ -355,7 +378,9 @@ class Agent:
             snap.play_limited = r.play_limited
             snap.play_s = r.play_s if r.play_limited else 0
             snap.play_released = r.play_limited or old is None or not old.play_limited
-            self._play_off[user] = None  # a new play snapshot: try enforcing play again
+            if old is None or old.play_limited != r.play_limited:
+                self._play_off[user] = None  # play limited/unlimited changed: try enforcing play again
+                self._play_off_warned.discard(user)
         if snap != old:
             self._snap[user] = snap
             self._save_snapshot(user, snap)
