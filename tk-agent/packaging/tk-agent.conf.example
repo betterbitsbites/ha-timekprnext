@@ -16,3 +16,11 @@ interval_s = 45
 # state_dir = /var/lib/tk-agent
 # Only if the host name is unsuitable ([a-z0-9_-]+ after lower-casing, must differ from every user name):
 # host_id = <client-host>
+
+# Remote-desktop links reported to Home Assistant (optional): Wayland sessions get
+# rdp://<kid>@<host>:<rdp_port>, X11 sessions vnc://<host>:<vnc_base_port + display number>.
+# host defaults to this PC's host name; set a name or IP the parents' PCs can reach.
+# [remote]
+# host = <client-host>
+# rdp_port = 3389
+# vnc_base_port = 5900

@@ -1,5 +1,8 @@
+import dataclasses
 import json
 from datetime import datetime, timedelta
+
+from pathlib import Path
 
 import pytest
 
@@ -9,8 +12,8 @@ from tk_agent.meter import UsageMeter
 from tk_protocol import topics
 from tk_protocol.bus import InMemoryBus
 from tk_protocol.clock import FixedClock
-from tk_agent.sessions import LoginctlError, Session
-from tk_protocol.payloads import Action, Event, Remaining, Settings, Sessions, Usage
+from tk_agent.sessions import Loginctl, LoginctlError, Session
+from tk_protocol.payloads import Action, Applied, Event, Remaining, Settings, Sessions, Usage
 
 USER = KID = "kid-a"  # the timekpr user name is the kid id
 HOST = "pc1"
@@ -124,7 +127,9 @@ def senv(env):
 
 
 def published_sessions(bus):
-    return [Sessions.from_json(p) for t, p, _ in bus.published if t == topics.sessions(HOST, KID)]
+    """(count, locked) of every sessions report; presence fields are tested separately."""
+    return [(r.count, r.locked) for r in (Sessions.from_json(p) for t, p, _ in bus.published
+                                          if t == topics.sessions(HOST, KID))]
 
 
 @pytest.fixture
@@ -507,19 +512,19 @@ def test_sessions_published_retained_once_and_on_change(senv):
     agent.tick()
     agent.tick()
     assert json.loads(bus.retained[topics.sessions(HOST, KID)]) == {
-        "count": 1, "locked": 1, "state": "none", "kind": "none", "connect": ""}
+        "count": 1, "locked": 1, "state": "locked", "kind": "wayland", "connect": ""}
     assert [r for t, _, r in bus.published if t == topics.sessions(HOST, KID)] == [True]
-    assert published_sessions(bus) == [Sessions(1, 1)]
+    assert published_sessions(bus) == [(1, 1)]
     fs.by_user[USER] = [sess("5", locked=True), sess("8")]
     agent.tick()
-    assert published_sessions(bus) == [Sessions(1, 1), Sessions(2, 1)]
+    assert published_sessions(bus) == [(1, 1), (2, 1)]
 
 
 def test_sessions_published_first_tick_even_if_retained_exists(senv):
     agent, bus, tk, clock, fs = senv
     bus.publish(topics.sessions(HOST, KID), Sessions(0, 0).to_json(), retain=True)
     agent.tick()
-    assert published_sessions(bus) == [Sessions(0, 0), Sessions(0, 0)]
+    assert published_sessions(bus) == [(0, 0), (0, 0)]
 
 
 def test_sessions_published_for_logged_out_user(senv):
@@ -527,7 +532,7 @@ def test_sessions_published_for_logged_out_user(senv):
     tk.logged_out.add(USER)
     agent.tick()
     agent.tick()
-    assert published_sessions(bus) == [Sessions(0, 0)]
+    assert published_sessions(bus) == [(0, 0)]
 
 
 def test_sessions_error_warns_once_and_publishes_nothing(senv, caplog):
@@ -606,7 +611,7 @@ def test_sessions_count_leaves_out_closing(senv):
     agent, bus, tk, clock, fs = senv
     fs.by_user[USER] = [sess("1"), sess("2", state="closing", locked=True)]
     agent.tick()
-    assert published_sessions(bus) == [Sessions(1, 0)]
+    assert published_sessions(bus) == [(1, 0)]
     action(bus, "end_inactive", clock.now().isoformat())
     assert fs.ended_sessions == ["2"]  # closing sessions are still ended
 
@@ -629,13 +634,13 @@ def test_reconnect_republishes_online_and_sessions(senv):
     fs.by_user[USER] = [sess("1")]
     agent.tick()
     agent.tick()
-    assert published_sessions(bus) == [Sessions(1, 0)]
+    assert published_sessions(bus) == [(1, 0)]
     bus.publish(topics.status(HOST), "offline", retain=True)  # the broker fired the last will
     bus.drop()
     bus.reconnect()
     assert bus.retained[topics.status(HOST)] == "online"
     agent.tick()
-    assert published_sessions(bus) == [Sessions(1, 0), Sessions(1, 0)]
+    assert published_sessions(bus) == [(1, 0), (1, 0)]
 
 
 def test_action_triggers_republish_next_tick(senv):
@@ -644,7 +649,7 @@ def test_action_triggers_republish_next_tick(senv):
     agent.tick()
     action(bus, "end_inactive", clock.now().isoformat())
     agent.tick()
-    assert published_sessions(bus) == [Sessions(1, 1), Sessions(1, 1)]
+    assert published_sessions(bus) == [(1, 1), (1, 1)]
 
 
 # --- play time --------------------------------------------------------------------------
@@ -959,3 +964,205 @@ def test_play_read_is_one_realtime_call_per_tick(env):
         agent.tick()
         tk.run(45)
     assert tk.rt_calls == 3
+
+
+# --- presence ---------------------------------------------------------------------------
+
+def x11_loginctl(fixture="show-session-x11-locked.txt"):
+    text = (Path(__file__).parent / "fixtures" / fixture).read_text()
+    return Loginctl(lambda argv: "7\n" if argv[0] == "show-user" else text)
+
+
+def test_x11_locked_session_reported_with_vnc_url(env):
+    agent, bus, tk, clock = env
+    cfg = dataclasses.replace(agent.cfg, remote_host="pc1")
+    agent = Agent(cfg, bus, tk, agent._meter_factory, clock, x11_loginctl())
+    agent.start()
+    agent.tick()
+    assert Sessions.from_json(bus.retained[topics.sessions(HOST, KID)]) == Sessions(
+        count=1, locked=1, state="locked", kind="x11", connect="vnc://pc1:5901")
+
+
+@pytest.mark.parametrize("found,state,kind,connect", [
+    ([], "none", "none", ""),
+    ([Session("1", "user", "wayland", "active", False, False)], "active", "wayland", "rdp://kid-a@pc1:3389"),
+    ([Session("1", "user", "wayland", "online", False, False)], "away", "wayland", "rdp://kid-a@pc1:3389"),
+    ([Session("1", "user", "tty", "active", False, True)], "active", "tty", ""),
+    ([Session("1", "user", "unspecified", "online", False, True)], "away", "tty", ""),
+    ([Session("1", "user", "wayland", "closing", False, False)], "none", "none", ""),
+])
+def test_presence_fields(env, found, state, kind, connect):
+    agent, bus, tk, clock = env
+    fs = FakeSessions()
+    fs.by_user[USER] = found
+    agent = Agent(dataclasses.replace(agent.cfg, remote_host="pc1"), bus, tk, agent._meter_factory, clock, fs)
+    agent.start()
+    agent.tick()
+    r = Sessions.from_json(bus.retained[topics.sessions(HOST, KID)])
+    assert (r.state, r.kind, r.connect) == (state, kind, connect)
+
+
+def test_presence_change_alone_republishes(senv):
+    agent, bus, tk, clock, fs = senv
+    fs.by_user[USER] = [sess("1")]
+    agent.tick()
+    fs.by_user[USER] = [sess("1", state="online")]
+    agent.tick()
+    states = [Sessions.from_json(p).state for t, p, _ in bus.published if t == topics.sessions(HOST, KID)]
+    assert states == ["active", "away"]
+
+
+# --- immediate apply and acks --------------------------------------------------------------
+
+def send_rev(bus, total_s, rev, kid=KID):
+    bus.publish(topics.remaining(kid), Remaining(week=WEEK, total_s=total_s, limited=True, rev=rev).to_json(),
+                retain=True)
+
+
+def acks(bus, kid=KID):
+    return [(Applied.from_json(p).rev, r) for t, p, r in bus.published if t == topics.applied(HOST, kid)]
+
+
+def test_new_remaining_wakes_and_is_acked_once(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    agent.tick()
+    assert not agent.wake.is_set()
+    send_rev(bus, 600, rev=3)
+    assert agent.wake.is_set()
+    assert acks(bus) == []  # acked after the tick that applied it, not on receipt
+    agent.tick()
+    agent.tick()
+    assert tk.writes == [(USER, 600)]
+    assert acks(bus) == [(3, True)]
+
+
+def test_redelivered_remaining_does_not_wake(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_rev(bus, 600, rev=3)
+    agent.tick()
+    agent.wake.clear()
+    bus.drop()
+    bus.reconnect()  # retained remaining re-delivered unchanged
+    assert not agent.wake.is_set()
+
+
+def test_same_values_new_rev_wakes_acks_and_keeps_receipt(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_rev(bus, 600, rev=3)
+    agent.tick()
+    tk.run(300)
+    agent.tick()
+    agent.wake.clear()
+    send_rev(bus, 600, rev=4)  # the parent set the same value again
+    assert agent.wake.is_set()
+    agent.tick()
+    assert tk.writes == [(USER, 600)]  # receipt point unchanged: 300 s left, nothing written
+    assert acks(bus) == [(3, True), (4, True)]
+
+
+def test_logged_out_user_not_acked(env):
+    agent, bus, tk, _ = env
+    tk.logged_out.add(USER)
+    agent.start()
+    send_rev(bus, 600, rev=3)
+    agent.tick()
+    assert acks(bus) == []
+    tk.logged_out.discard(USER)
+    agent.tick()
+    assert acks(bus) == [(3, True)]
+
+
+def test_settings_only_change_wakes_and_is_acked(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_rev(bus, 600, rev=3)
+    agent.tick()
+    agent.wake.clear()
+    bus.publish(topics.settings(KID), Settings(time_up_action="lock", rev=4).to_json(), retain=True)
+    assert agent.wake.is_set()
+    agent.tick()
+    assert acks(bus) == [(3, True), (4, True)]
+
+
+def test_settings_same_action_new_rev_wakes(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    bus.publish(topics.settings(KID), Settings(time_up_action="lock", rev=1).to_json(), retain=True)
+    agent.tick()
+    agent.wake.clear()
+    bus.publish(topics.settings(KID), Settings(time_up_action="lock", rev=2).to_json(), retain=True)
+    assert agent.wake.is_set()
+    agent.tick()
+    assert acks(bus) == [(1, True), (2, True)]
+
+
+def test_rev_zero_never_acked(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_remaining(bus, 600)
+    agent.tick()
+    assert acks(bus) == []
+
+
+def test_failed_tick_not_acked(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_rev(bus, 600, rev=3)
+
+    def boom(user, seconds):
+        raise RuntimeError("timekpra down")
+
+    tk.set_time_left_s = boom
+    agent.tick()
+    assert acks(bus) == []
+
+
+def test_remaining_rev_persisted_and_reacked_after_restart(env, tmp_path):
+    agent, bus, tk, clock = env
+    agent.start()
+    send_rev(bus, 600, rev=3)
+    agent.tick()
+    agent2 = new_agent(agent, InMemoryBus(), tk, clock, tmp_path)  # no broker: rev from the snapshot file
+    agent2.start()
+    agent2.tick()
+    assert acks(agent2._bus) == [(3, True)]
+
+
+def test_old_snapshot_without_rev_loads_as_zero(env, tmp_path):
+    agent, bus, tk, clock = env
+    (tmp_path / f"{USER}.remaining.json").write_text(json.dumps(
+        {"week": WEEK, "total_s": 600, "receipt_week": WEEK, "receipt_usage_s": 0}))
+    agent.start()
+    agent.tick()
+    assert tk.writes == [(USER, 600)]
+    assert acks(bus) == []
+
+
+def test_reconnect_reacks(env):
+    agent, bus, tk, _ = env
+    agent.start()
+    send_rev(bus, 600, rev=3)
+    agent.tick()
+    bus.drop()
+    bus.reconnect()
+    agent.tick()
+    assert acks(bus) == [(3, True), (3, True)]
+
+
+def test_usage_driven_remaining_does_not_wake(env):
+    """tk-budget republishes remaining after every usage report with the same rev: waking on that
+    would tick again at once, publish usage again, and loop as fast as the broker answers."""
+    agent, bus, tk, _ = env
+    agent.start()
+    send_rev(bus, 600, rev=3)
+    agent.tick()
+    agent.wake.clear()
+    tk.run(45)
+    agent.tick()
+    send_rev(bus, 555, rev=3)  # tk-budget's answer to the usage report
+    assert not agent.wake.is_set()
+    agent.tick()
+    assert acks(bus) == [(3, True)]

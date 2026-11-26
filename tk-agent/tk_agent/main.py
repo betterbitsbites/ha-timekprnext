@@ -6,7 +6,6 @@ import logging
 import os
 import stat
 import sys
-import time
 
 from tk_protocol import topics
 from tk_protocol.bus import PahoBus
@@ -44,7 +43,9 @@ def main() -> None:
             agent.tick()
         except Exception:
             log.exception("tick failed")
-        time.sleep(cfg.interval_s)
+        # a changed remaining/settings wakes the loop at once; the tick still runs on this thread
+        agent.wake.wait(cfg.interval_s)
+        agent.wake.clear()
 
 
 if __name__ == "__main__":

@@ -11,9 +11,13 @@ import subprocess
 from dataclasses import dataclass
 from typing import Callable
 
+from .config import Config
+
 Runner = Callable[[list[str]], str]
 
 _SESSION_ID_RE = re.compile(r"^[0-9a-z]+$")
+_X11_DISPLAY_RE = re.compile(r"^:(\d+)(?:\.\d+)?$")
+GRAPHICAL = ("wayland", "x11")
 
 
 class LoginctlError(RuntimeError):
@@ -42,10 +46,40 @@ class Session:
     state: str
     locked: bool
     remote: bool
+    display: str = ""  # X11 display such as ":1"; empty for Wayland and text sessions
 
 
 def inactive(s: Session) -> bool:
     return s.locked or s.state != "active"
+
+
+def primary(sessions: list[Session]) -> Session | None:
+    """The session that best describes where the kid is: a graphical one that is active and
+    unlocked, else a graphical locked one, else a graphical one switched away from (`online`),
+    else the first session that is not closing; None if there is none."""
+    live = [s for s in sessions if s.state != "closing"]
+    graphical = [s for s in live if s.type in GRAPHICAL]
+    for pick in (lambda s: s.state == "active" and not s.locked, lambda s: s.locked,
+                 lambda s: s.state == "online"):
+        for s in graphical:
+            if pick(s):
+                return s
+    return live[0] if live else None
+
+
+def connect_url(cfg: Config, kid: str, s: Session | None) -> str:
+    """Remote-desktop URL for session `s`: RDP for Wayland, VNC by display number for X11, else ""."""
+    if s is None or not cfg.remote_host:
+        return ""
+    if s.type == "wayland":
+        return f"rdp://{kid}@{cfg.remote_host}:{cfg.rdp_port}"
+    if s.type == "x11":
+        m = _X11_DISPLAY_RE.match(s.display)
+        if m:
+            port = cfg.vnc_base_port + int(m.group(1))
+            if port <= 65535:
+                return f"vnc://{cfg.remote_host}:{port}"
+    return ""
 
 
 class Loginctl:
@@ -65,7 +99,7 @@ class Loginctl:
         for sid in ids:
             try:
                 out = self._run(["show-session", _session_id(sid), "-p", "Id", "-p", "Class", "-p", "Type",
-                                 "-p", "State", "-p", "Remote", "-p", "LockedHint"])
+                                 "-p", "State", "-p", "Remote", "-p", "LockedHint", "-p", "Display"])
             except LoginctlUnavailable:
                 raise
             except LoginctlError:
@@ -74,7 +108,8 @@ class Loginctl:
             cls = props.get("Class", "")
             if cls.startswith("user"):
                 found.append(Session(id=sid, cls=cls, type=props.get("Type", ""), state=props.get("State", ""),
-                                     locked=props.get("LockedHint") == "yes", remote=props.get("Remote") == "yes"))
+                                     locked=props.get("LockedHint") == "yes", remote=props.get("Remote") == "yes",
+                                     display=props.get("Display", "")))
         return found
 
     def terminate_session(self, session_id: str) -> None:

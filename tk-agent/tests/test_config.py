@@ -60,3 +60,21 @@ def test_leftover_kids_section_tolerated(tmp_path, caplog):
 def test_agent_section_optional(tmp_path):
     cfg = load(write(tmp_path, GOOD.replace("[agent]\ninterval_s = 45\n", "")), hostname=lambda: "pc1")
     assert cfg.interval_s == 45
+
+
+def test_remote_defaults_from_hostname(tmp_path):
+    cfg = load(write(tmp_path, GOOD), hostname=lambda: "Kid-PC.fritz.box")
+    assert (cfg.remote_host, cfg.rdp_port, cfg.vnc_base_port) == ("Kid-PC", 3389, 5900)
+
+
+def test_remote_section_overrides(tmp_path):
+    text = GOOD + "\n[remote]\nhost = 192.168.1.20\nrdp_port = 3390\nvnc_base_port = 5910\n"
+    cfg = load(write(tmp_path, text), hostname=lambda: "pc1")
+    assert (cfg.remote_host, cfg.rdp_port, cfg.vnc_base_port) == ("192.168.1.20", 3390, 5910)
+
+
+@pytest.mark.parametrize("line", ["host = pc 1", "host = pc/1", "host = rdp://pc1", "rdp_port = 0",
+                                  "rdp_port = 65536", "vnc_base_port = -1", "vnc_base_port = x"])
+def test_bad_remote_rejected(tmp_path, line):
+    with pytest.raises(ValueError):
+        load(write(tmp_path, GOOD + "\n[remote]\n" + line + "\n"), hostname=lambda: "pc1")

@@ -1,0 +1,13 @@
+Id=7
+Name=kid-a
+Timestamp=Thu 2026-11-26 11:42:29 CET
+Seat=seat0
+TTY=tty2
+Display=:1
+Remote=no
+Type=x11
+Class=user
+Active=yes
+State=active
+IdleHint=no
+LockedHint=yes

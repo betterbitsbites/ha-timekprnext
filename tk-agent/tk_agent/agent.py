@@ -17,6 +17,14 @@ write does not stick (PlayTime off in timekpr), play is left alone until the nex
 change of play limited/unlimited, or 15 minutes later (so PlayTime switched on later is picked
 up); a changed play value alone does not retry, since tk-budget caps play by total and so
 changes it with every usage report. Play usage is still measured and reported.
+
+Apply feedback: a `remaining` with a new revision (parent input) or changed `settings` sets
+`wake`, so the main loop ticks at once instead of waiting for the interval (handlers only set it;
+ticks stay on the main thread). A remaining that changed only through usage reports (same rev)
+does not wake: that would tick, report usage and be answered again at once, in a loop. Both
+carry tk-budget's revision `rev`; after a tick that finished for a logged-in user, the agent acks
+the highest revision it holds for that user with a retained `Applied` (rev 0 is never acked).
+A new rev with unchanged values counts as a change (wake, ack) but keeps the receipt points.
 """
 
 from __future__ import annotations
@@ -35,11 +43,11 @@ from typing import Callable, Protocol, TypeVar
 from tk_protocol import topics
 from tk_protocol.bus import Bus
 from tk_protocol.clock import Clock
-from tk_protocol.payloads import Action, Event, Remaining, Settings, Sessions, Usage
+from tk_protocol.payloads import Action, Applied, Event, Remaining, Settings, Sessions, Usage
 
 from .config import Config
 from .meter import UsageMeter
-from .sessions import Session, inactive
+from .sessions import GRAPHICAL, Session, connect_url, inactive, primary
 from .timekpra import LOCKOUT_TYPES
 
 log = logging.getLogger(__name__)
@@ -82,6 +90,7 @@ class _Snapshot:
     play_receipt_week: str = ""  # play meter week when the play part was received
     play_receipt_usage_s: int = 0  # play meter week total when the play part was received
     play_released: bool = True  # play unlimited only: like `released`
+    rev: int = 0  # tk-budget's revision of the last received remaining
 
 
 def _same_part(old_limited: bool, new_limited: bool, old_key: tuple, new_key: tuple) -> bool:
@@ -126,6 +135,9 @@ class Agent:
         self._up_sent: dict[str, bool] = {}
         # last message per kid not on this PC (yet): replayed when the user appears
         self._pending: dict[tuple[str, str], tuple[str, str]] = {}
+        self._settings_rev: dict[str, int] = {}  # rev of the last accepted settings (in memory)
+        self._acked: dict[str, int] = {}  # last rev published as Applied (in memory)
+        self.wake = threading.Event()  # set by handlers when remaining/settings changed
 
     @_locked
     def start(self) -> None:
@@ -143,15 +155,26 @@ class Agent:
         """After a reconnect: the broker may have fired the last will, and missed sessions reports."""
         self._bus.publish(topics.status(self.cfg.host_id), "online", retain=True)
         self._sess_sent.clear()  # the next tick republishes sessions
+        self._acked = dict.fromkeys(self._acked, 0)  # ... and acks, in case one was lost
 
     @_locked
     def tick(self) -> None:
         self._refresh_users()
         for user in self._users:
             try:
-                self._tick_user(user)
+                logged_in = self._tick_user(user)
             except Exception:
                 log.exception("tick failed for %s", user)
+                continue
+            if logged_in:
+                self._ack(user)
+
+    def _ack(self, user: str) -> None:
+        snap = self._snap[user]
+        want = max(snap.rev if snap is not None else 0, self._settings_rev[user])
+        if want > self._acked[user]:
+            self._bus.publish(topics.applied(self.cfg.host_id, user), Applied(rev=want).to_json(), retain=True)
+            self._acked[user] = want
 
     def _refresh_users(self) -> None:
         try:
@@ -179,6 +202,7 @@ class Agent:
         self._snap[user] = self._load_snapshot(user)
         self._action_wanted[user] = self._action_applied[user] = None
         self._low_sent[user] = self._up_sent[user] = False
+        self._settings_rev[user] = self._acked[user] = 0
         for kind, handler in (("usage", self._on_own_usage), ("remaining", self._on_remaining),
                               ("settings", self._on_settings)):
             msg = self._pending.pop((kind, user), None)
@@ -195,7 +219,8 @@ class Agent:
 
     # --- per user -------------------------------------------------------------
 
-    def _tick_user(self, user: str) -> None:
+    def _tick_user(self, user: str) -> bool:
+        """One tick for `user`; returns whether the user is logged in (timekpr has real-time info)."""
         kid = user
         meter, pmeter = self._meters[user], self._play_meters[user]
         left = self._tk.time_left_s(user)
@@ -214,14 +239,15 @@ class Agent:
         self._bus.publish(topics.usage(self.cfg.host_id, kid), u.to_json(), retain=True)
         self._report_sessions(user)
         if left is None:
-            return  # not logged in: uses no time, and timekpr ignores writes until login
+            return False  # not logged in: uses no time, and timekpr ignores writes until login
 
         snap = self._snap[user]
         if snap is None:
-            return  # nothing known yet: leave timekpr untouched
+            return True  # nothing known yet: leave timekpr untouched
         cap = self._enforce_total(user, kid, snap, left, u)
         if play_left is not None:
             self._enforce_play(user, snap, play_left, cap)
+        return True
 
     def _enforce_total(self, user: str, kid: str, snap: _Snapshot, left: int, u: Usage) -> int:
         """Enforce the total part; returns the total time left expected in timekpr after this tick."""
@@ -314,7 +340,15 @@ class Agent:
             return
         self._sess_warned.discard(user)
         live = [s for s in found if s.state != "closing"]  # closing: already ending, not counted
-        report = Sessions(count=len(live), locked=sum(1 for s in live if s.locked))
+        p = primary(live)
+        if p is None:
+            state, kind = "none", "none"
+        else:
+            state = ("locked" if p.locked else "active" if p.state == "active"
+                     else "away" if p.state == "online" else "none")
+            kind = p.type if p.type in GRAPHICAL else "tty"
+        report = Sessions(count=len(live), locked=sum(1 for s in live if s.locked), state=state,  # type: ignore[arg-type]
+                          kind=kind, connect=connect_url(self.cfg, user, p))  # type: ignore[arg-type]
         if self._sess_sent.get(user) != report:
             self._bus.publish(topics.sessions(self.cfg.host_id, user), report.to_json(), retain=True)
             self._sess_sent[user] = report
@@ -381,9 +415,14 @@ class Agent:
             if old is None or old.play_limited != r.play_limited:
                 self._play_off[user] = None  # play limited/unlimited changed: try enforcing play again
                 self._play_off_warned.discard(user)
+        snap.rev = r.rev  # a new rev alone moves no receipt point, but is acked
         if snap != old:
             self._snap[user] = snap
             self._save_snapshot(user, snap)
+            if old is None or snap.rev != old.rev:
+                # parent input (new rev) or first snapshot: apply now. Not on usage-driven
+                # republishes (same rev), which would tick, report usage and wake again in a loop.
+                self.wake.set()
 
     @_locked
     def _on_settings(self, topic: str, payload: str) -> None:
@@ -398,7 +437,10 @@ class Agent:
         if s.time_up_action not in LOCKOUT_TYPES:
             log.warning("ignoring unsupported time_up_action %r", s.time_up_action)
             return
-        self._action_wanted[user] = s.time_up_action
+        if s.time_up_action != self._action_wanted[user] or s.rev != self._settings_rev[user]:
+            self._action_wanted[user] = s.time_up_action
+            self._settings_rev[user] = s.rev
+            self.wake.set()
 
     @_locked
     def _on_own_usage(self, topic: str, payload: str) -> None:
@@ -461,7 +503,7 @@ class Agent:
                              bool(d.get("limited", True)), bool(d.get("released", True)),
                              int(d.get("play_s", 0)), bool(d.get("play_limited", False)),
                              str(d.get("play_receipt_week", "")), int(d.get("play_receipt_usage_s", 0)),
-                             bool(d.get("play_released", True)))
+                             bool(d.get("play_released", True)), int(d.get("rev", 0)))
         except FileNotFoundError:
             return None
         except (OSError, ValueError, KeyError, TypeError) as e:
